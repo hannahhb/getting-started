@@ -17,6 +17,12 @@ labels leak between the training and held-out sides. Site, depth, beta, and
 threshold are picked for plain accuracy on labelled rows; all rows, including
 the unlabelled band (0.10 < max_drop < 0.25), train directions and priors.
 
+**Behaviour score.** When feature files include short-resample features
+(``behaviour``), each model also gets a direction over those standardized
+features, fitted the same way, and its score enters with weight ``gamma``::
+
+    drop_hat = prior + beta * s_h * z_hidden + gamma * s_b * z_behaviour
+
 **Export.** The selected configuration is always exported, and every model's
 direction is saved, even when the selected beta is 0. ``--nested`` also
 reports a repeated nested-CV estimate of the whole selection procedure, since
@@ -32,7 +38,7 @@ import json
 import math
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -45,6 +51,7 @@ if str(SOLUTION_ROOT) not in sys.path:
 from diffmean_probe.artifact import (  # noqa: E402
     ARTIFACT_DIR,
     SCHEMA_VERSION,
+    Behaviour,
     ModelDirections,
     save_config,
     save_directions,
@@ -66,7 +73,9 @@ DEPTHS = (0.3, 0.5, 0.7)
 BETAS = (0.0, 0.3, 0.5)
 # Labels are robust at max_drop <= 0.10 and not robust at >= 0.25.
 THRESHOLDS = (0.175, 0.25)
-Config = tuple[str, float, float, float]  # site, depth, beta, threshold
+# Weight on the short-resample behaviour score (used when features have it).
+GAMMAS = (0.0, 0.3, 0.5)
+Config = tuple[str, float, float, float, float]  # site, depth, beta, gamma, threshold
 
 
 @dataclass
@@ -79,6 +88,8 @@ class Dataset:
     # Per encoder model: {site: (n_rows, n_hidden_states, d)} and the rows it has read.
     features: dict[str, dict[str, np.ndarray]]
     available: dict[str, np.ndarray]
+    # Per encoder model that has them: short-resample features (n_rows, n_features).
+    behaviour: dict[str, np.ndarray] = field(default_factory=dict)
 
 
 def _row_keys(data) -> list[tuple[str, str, str]]:
@@ -107,7 +118,7 @@ def load_feature_dataset(features_dir: Path) -> Dataset:
         if len(index) != len(table):
             raise SystemExit("feature files contain duplicate (model, problem, effort) rows")
 
-        features, available = {}, {}
+        features, available, behaviour = {}, {}, {}
         for data in files:
             encoder = str(data["model_id"])
             rows = [index[key] for key in _row_keys(data)]
@@ -121,6 +132,11 @@ def load_feature_dataset(features_dir: Path) -> Dataset:
                 full = np.zeros((len(table),) + values.shape[1:], dtype=np.float32)
                 full[rows] = values
                 features[encoder][site] = full
+            if "behaviour" in data.files:
+                values = data["behaviour"].astype(np.float64)
+                full = np.zeros((len(table), values.shape[1]))
+                full[rows] = values
+                behaviour[encoder] = full
     finally:
         for data in files:
             data.close()
@@ -133,6 +149,7 @@ def load_feature_dataset(features_dir: Path) -> Dataset:
         labels=np.asarray([label for _, _, label in table], dtype=np.int8),
         features=features,
         available=available,
+        behaviour=behaviour,
     )
 
 
@@ -155,11 +172,15 @@ def load_label_dataset() -> Dataset:
     )
 
 
-def configs(has_features: bool) -> list[Config]:
+def configs(data: Dataset) -> list[Config]:
+    has_features = bool(data.features)
     sites = SITES if has_features else ("last",)
     depths = DEPTHS if has_features else (0.5,)
     betas = BETAS if has_features else (0.0,)
-    return [(s, d, b, t) for s in sites for d in depths for b in betas for t in THRESHOLDS]
+    gammas = GAMMAS if data.behaviour else (0.0,)
+    return [
+        (s, d, b, g, t) for s in sites for d in depths for b in betas for g in gammas for t in THRESHOLDS
+    ]
 
 
 def row_priors(data: Dataset, priors: dict, rows: np.ndarray) -> np.ndarray:
@@ -173,6 +194,17 @@ def fit_encoder(data: Dataset, encoder: str, site: str, depth: float, train: np.
     layers = layer_window(site_features.shape[1], depth)
     residuals = data.targets[rows] - row_priors(data, priors, rows)
     return layers, fit_direction(site_features[rows][:, layers], residuals)
+
+
+def fit_behaviour(data: Dataset, encoder: str, train: np.ndarray, priors: dict) -> Behaviour | None:
+    """Standardize ``encoder``'s behaviour features on its training rows, then fit a direction."""
+    rows = train[data.available[encoder][train]]
+    values = data.behaviour[encoder][rows]
+    mean, std = values.mean(axis=0), values.std(axis=0)
+    std = np.where(std > 0, std, 1.0)
+    residuals = data.targets[rows] - row_priors(data, priors, rows)
+    direction = fit_direction(((values - mean) / std)[:, None, :], residuals)
+    return None if direction is None else Behaviour(mean=mean, std=std, direction=direction)
 
 
 def fold_scores(data: Dataset, train: np.ndarray, test: np.ndarray, priors: dict) -> dict:
@@ -192,6 +224,18 @@ def fold_scores(data: Dataset, train: np.ndarray, test: np.ndarray, priors: dict
                 z[local] = direction.score(data.features[encoder][site][test[local]][:, layers])
                 target_scale[local] = direction.target_scale
             scores[(site, depth)] = (z, target_scale)
+    if data.behaviour:
+        z, target_scale = np.zeros(len(test)), np.zeros(len(test))
+        for encoder in data.behaviour:
+            local = np.flatnonzero((owners == encoder) & data.available[encoder][test])
+            if not len(local):
+                continue
+            behaviour = fit_behaviour(data, encoder, train, priors)
+            if behaviour is None:
+                continue
+            z[local] = behaviour.score(data.behaviour[encoder][test[local]])
+            target_scale[local] = behaviour.direction.target_scale
+        scores["behaviour"] = (z, target_scale)
     return scores
 
 
@@ -202,11 +246,13 @@ def fold_predictions(data: Dataset, train: np.ndarray, test: np.ndarray, grid: l
     prior = row_priors(data, priors, test)
     scores = fold_scores(data, train, test, priors)
     zeros = (np.zeros(len(test)), np.zeros(len(test)))
+    z_behaviour, scale_behaviour = scores.get("behaviour", zeros)
     predictions = {}
-    for site, depth, beta, threshold in grid:
+    for site, depth, beta, gamma, threshold in grid:
         z, target_scale = scores.get((site, depth), zeros)
         drop = predict_drop(prior, z, beta, target_scale)
-        predictions[(site, depth, beta, threshold)] = decide(drop, threshold)
+        drop = predict_drop(drop, z_behaviour, gamma, scale_behaviour)
+        predictions[(site, depth, beta, gamma, threshold)] = decide(drop, threshold)
     return predictions
 
 
@@ -220,7 +266,7 @@ def splitter_for(labels: np.ndarray, groups: np.ndarray, n_splits: int, seed: in
 
 def evaluate_grid(data: Dataset, subset: np.ndarray, repeats: int, n_splits: int, seed: int) -> dict:
     """Mean grouped-CV accuracy (labelled rows only) per config on ``subset``."""
-    grid = configs(bool(data.features))
+    grid = configs(data)
     totals: dict[Config, list[float]] = {config: [] for config in grid}
     labels = data.labels[subset]
     scored = labels >= 0
@@ -243,10 +289,10 @@ def evaluate_grid(data: Dataset, subset: np.ndarray, repeats: int, n_splits: int
 
 
 def select(grid: dict[Config, float]) -> Config:
-    """Best accuracy; ties prefer smaller beta, mid-depth, then the label-band midpoint."""
+    """Best accuracy; ties prefer smaller beta and gamma, mid-depth, then the label-band midpoint."""
     return max(
         grid,
-        key=lambda c: (round(grid[c], 6), -c[2], -abs(c[1] - 0.5), -abs(c[3] - 0.175)),
+        key=lambda c: (round(grid[c], 6), -c[2] - c[3], -abs(c[1] - 0.5), -abs(c[4] - 0.175)),
     )
 
 
@@ -296,7 +342,7 @@ def nested_report(data: Dataset, outer_repeats: int, inner_repeats: int, n_split
 
 
 def export(data: Dataset, config: Config, summary: dict, output_dir: Path) -> list[str]:
-    site, depth, beta, threshold = config
+    site, depth, beta, gamma, threshold = config
     everything = np.arange(len(data.labels))
     priors = fit_priors(data.model_ids, data.efforts, data.targets)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -306,8 +352,10 @@ def export(data: Dataset, config: Config, summary: dict, output_dir: Path) -> li
     if data.features:
         for encoder in data.features:
             layers, direction = fit_encoder(data, encoder, site, depth, everything, priors)
+            behaviour = fit_behaviour(data, encoder, everything, priors) if encoder in data.behaviour else None
             if direction is not None:
-                save_directions(encoder, ModelDirections(layers=layers, direction=direction), output_dir)
+                entry = ModelDirections(layers=layers, direction=direction, behaviour=behaviour)
+                save_directions(encoder, entry, output_dir)
                 exported.append(encoder)
     save_config(
         {
@@ -316,6 +364,7 @@ def export(data: Dataset, config: Config, summary: dict, output_dir: Path) -> li
             "site": site,
             "depth_fraction": depth,
             "beta": beta,
+            "gamma": gamma,
             "threshold": threshold,
             "priors": priors,
             "models_with_directions": exported,
@@ -347,7 +396,7 @@ def main(argv: Sequence[str] | None = None) -> dict:
     everything = np.arange(len(data.labels))
     result = evaluate_grid(data, everything, args.repeats, args.n_splits, args.seed)
     config = select(result["grid"])
-    prior_grid = {c: v for c, v in result["grid"].items() if c[2] == 0.0}
+    prior_grid = {c: v for c, v in result["grid"].items() if c[2] == 0.0 and c[3] == 0.0}
     labelled = data.labels >= 0
     summary = {
         "n_rows": int(len(data.labels)),
@@ -355,6 +404,7 @@ def main(argv: Sequence[str] | None = None) -> dict:
         "n_problems": len(set(data.problems)),
         "robust_rate": float((data.labels[labelled] == 1).mean()),
         "shared_features": bool(data.available) and all(mask.all() for mask in data.available.values()),
+        "behaviour_models": sorted(data.behaviour),
         "repeats": args.repeats,
         "selected": list(config),
         "selected_accuracy": result["grid"][config],
@@ -369,9 +419,9 @@ def main(argv: Sequence[str] | None = None) -> dict:
         ))
 
     exported = export(data, config, summary, args.output_dir)
-    site, depth, beta, threshold = config
+    site, depth, beta, gamma, threshold = config
     print(json.dumps(
-        {"site": site, "depth_fraction": depth, "beta": beta, "threshold": threshold,
+        {"site": site, "depth_fraction": depth, "beta": beta, "gamma": gamma, "threshold": threshold,
          "models_with_directions": exported, **summary},
         indent=2,
     ))

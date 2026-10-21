@@ -1,0 +1,75 @@
+{
+ "note": "Problems whose stated answer or statement was found wrong or ill-posed while writing variants; excluded by build_problems.py.",
+ "problems": [
+  {
+   "problem_id": "fb5174dfa0c7",
+   "source": "omni2",
+   "source_id": 3835,
+   "answer": 101,
+   "reason": "stated answer 101; the final number is 100 (product of (1+x) is invariant at 101)"
+  },
+  {
+   "problem_id": "34b9a1573c6a",
+   "source": "omni2",
+   "source_id": 2416,
+   "answer": 21,
+   "reason": "stated answer 21; counting solutions of 7a+5b+3c=525 gives 1351 (or 1276 with positive integers)"
+  },
+  {
+   "problem_id": "90088d875580",
+   "source": "amc",
+   "source_id": 29,
+   "answer": 5,
+   "reason": "stated answer 5 appears to come from misreading the mixed number 15 5/8; the overlap area is 125/8"
+  },
+  {
+   "problem_id": "76ce430f27a2",
+   "source": "omni2",
+   "source_id": 910,
+   "answer": 56,
+   "reason": "ambiguous condition: 56 under one reading, 63 under the literal one"
+  },
+  {
+   "problem_id": "fcc9fb05487a",
+   "source": "amc",
+   "source_id": 38,
+   "answer": 36,
+   "reason": "answer 36 relies on an unstated reading (136 pi taken as 136 mod 100)"
+  },
+  {
+   "problem_id": "6fa1672d7d7a",
+   "source": "omni2",
+   "source_id": 1030,
+   "answer": 49,
+   "reason": "estimation problem with no exact answer"
+  },
+  {
+   "problem_id": "90826e703a77",
+   "source": "omni2",
+   "source_id": 2259,
+   "answer": 48,
+   "reason": "refers to its own answer (relay problem); not well-posed standalone"
+  },
+  {
+   "problem_id": "a9690ed9ce71",
+   "source": "aime",
+   "source_id": 29,
+   "answer": 244,
+   "reason": "statement says \"more than 1\" where the answer 244 needs \"more than two\""
+  },
+  {
+   "problem_id": "5d90e4ea3e4d",
+   "source": "omni2",
+   "source_id": 1243,
+   "answer": 252,
+   "reason": "set definition has swapped bounds (typo) that change the problem"
+  },
+  {
+   "problem_id": "a383b3d4bc0e",
+   "source": "aime",
+   "source_id": 88,
+   "answer": 127,
+   "reason": "says the torus rests on the outside in both cases; one should be inside"
+  }
+ ]
+}

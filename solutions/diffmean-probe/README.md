@@ -65,25 +65,84 @@ this artifact is the same as always-True on that data. It is a valid fallback;
 the representation part needs the GPU steps below. Training overwrites
 `artifacts/`, and its `cv` block records the CV summary.
 
-## Reproduce on a GPU (1–2 A100 80GB)
+## Behaviour score (short resampling)
+
+Besides the prompt's hidden states, each model samples 8 continuations of 64
+tokens from the prompt (temperature 1, fixed seed) and four numbers summarize
+how much they disagree: dispersion of the continuations' mid-layer states,
+the same over the first 16 tokens, mean next-token entropy, and mean NLL of the
+sampled tokens. Training fits a direction over these (standardized), the same
+way as for hidden states, and weights it with `gamma` in {0, 0.3, 0.5}:
+
+```text
+drop_hat = prior + beta * s_h * z_hidden + gamma * s_b * z_behaviour
+```
+
+At evaluation time this costs one short generation per problem.
+
+## More labelled data (`datagen/`)
+
+Since the 19 Sep clarification, self-generated labels are allowed. The
+pipeline in `datagen/` builds them in the `train-main-v2` schema:
+
+1. `build_problems.py`: 296 integer-answer problems at pinned revisions: all
+   of AIME 2022-24 and AMC 2022-23 (AI-MO validation sets), plus 123 problems
+   from Omni-MATH-2 (`martheballon/Omni-MATH-2`, the manually revised
+   Omni-MATH), pinned by id in `datagen/omni2_ids.json`. Omni-MATH-2 problems
+   tagged non-standard and answers that are not a single integer are skipped,
+   and problems in `train-main-v2` are excluded.
+2. `perturb.py`: one rule-based `typos` variant per problem, plus one variant
+   per problem of rephrase, rename, domain, distract, and **expert** (an
+   answer-preserving edit that needs real understanding of the problem, e.g. an
+   equivalent but unfamiliar restatement of a condition). The written variants
+   were produced by Claude and are stored in `datagen/written_variants.jsonl`,
+   each with a `check` note on why its answer is unchanged. Variants whose
+   answer could not be verified were left out. Some source answers look wrong
+   even in Omni-MATH-2 (e.g. the a+b+ab blackboard problem, listed as 101 but
+   actually 100); `label.py` drops problems a model cannot solve unperturbed,
+   which removes most such cases.
+3. `sample.py`: each target model answers every original 8 times and every
+   variant 4 times, at temperature 1.0 with up to 16k tokens; truncated
+   answers count as wrong.
+4. `label.py`: `max_drop = max over types (base accuracy - type accuracy)`,
+   labelled with the 0.10/0.25 thresholds. Problems with base accuracy below
+   0.5 are dropped, following the organizers' rule of dropping rows where the
+   original is not robustly correct.
+
+Step 3 needs vLLM, which pins its own torch, so run it in a separate
+environment (e.g. `python -m venv $PROJ/venvs/vllm && $PROJ/venvs/vllm/bin/pip install vllm`).
+Steps 1, 2, and 4 run with `uv run`. Each script's `--help` lists its options.
+
+## Reproduce on a GPU (1–2 A100)
 
 ```bash
-# 1. Every model reads every training problem (36 prompts per model, minutes each).
+# 1. Generate labels (optional; skip to use train-main-v2 only).
+uv run datagen/build_problems.py
+uv run datagen/perturb.py
+for m in Qwen/Qwen3.5-4B Skywork/Skywork-OR1-Math-7B allenai/Olmo-3-7B-Think deepseek-ai/DeepSeek-R1-0528-Qwen3-8B; do
+  $PROJ/venvs/vllm/bin/python datagen/sample.py --model "$m"
+done
+uv run datagen/label.py
+
+# 2. Every model reads every row: hidden states plus behaviour features.
 uv run solutions/diffmean-probe/scripts/extract_features.py \
+  --extra-rows data/labelgen/labels.jsonl \
+  --output-dir data/diffmean-probe/features-extended \
   --models Qwen/Qwen3.5-4B Skywork/Skywork-OR1-Math-7B \
            allenai/Olmo-3-7B-Think deepseek-ai/DeepSeek-R1-0528-Qwen3-8B
-
-# 2. Optional: gpt-oss-120b. On A100, MXFP4 may dequantize to bf16 (~240 GB);
-#    device_map="auto" then offloads to CPU, which is slow but fine for 60 prompts.
-uv run solutions/diffmean-probe/scripts/extract_features.py --models openai/gpt-oss-120b
+# gpt-oss-120b offloads to CPU on A100s; --skip-behaviour avoids slow generation there.
+uv run solutions/diffmean-probe/scripts/extract_features.py \
+  --extra-rows data/labelgen/labels.jsonl \
+  --output-dir data/diffmean-probe/features-extended \
+  --models openai/gpt-oss-120b --skip-behaviour
 
 # 3. Select by grouped CV and export (add --nested for the nested estimate).
 uv run solutions/diffmean-probe/scripts/train_diffmean.py \
-  --features-dir data/diffmean-probe/features-shared
+  --features-dir data/diffmean-probe/features-extended
 ```
 
-Features now go to `data/diffmean-probe/features-shared/`, so the older
-own-rows files in `features/` are not overwritten.
+Use a new `--output-dir` whenever the rows change: training refuses feature
+files whose rows are not in the same order.
 
 ## Export and nested CV
 

@@ -5,8 +5,10 @@ Run on a GPU machine. Each model encodes *all* training rows, not just its
 own, so the shared probe can learn each model's direction from every model's
 labels. One ``<safe-model-id>.npz`` per model is written to ``--output-dir``
 with float32 ``last`` and ``mean`` arrays of shape
-``(n_rows, n_hidden_states, hidden)`` plus row metadata (``row_model_id``,
-the ``max_drop`` target, and ``label``). Rows are in the same order in every
+``(n_rows, n_hidden_states, hidden)``, a ``behaviour`` array of short-resample
+features ``(n_rows, n_features)``, and row metadata (``row_model_id``, the
+``max_drop`` target, and ``label``). ``--extra-rows`` appends generated rows
+from ``datagen/label.py``. Rows are in the same order in every
 file. Models already present are skipped, so an interrupted run resumes.
 """
 
@@ -63,14 +65,44 @@ def load_rows(dataset: str, revision: str, split: str) -> list[dict]:
     return rows
 
 
+def load_extra_rows(path: Path) -> list[dict]:
+    """Rows from ``datagen/label.py`` (``labels.jsonl``), in the same shape as :func:`load_rows`."""
+    rows = []
+    with path.open(encoding="utf-8") as stream:
+        for line in stream:
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            model_id = str(row["model_id"])
+            label = row.get("is_robust")
+            rows.append(
+                {
+                    "model_id": model_id,
+                    "reasoning_effort": normalize_effort(model_id, row.get("reasoning_effort")),
+                    "problem": str(row["problem"]),
+                    "max_drop": float(row["max_drop"]),
+                    "label": int(label) if type(label) is bool else -1,
+                }
+            )
+    return rows
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", default=DEFAULT_DATASET)
     parser.add_argument("--revision", default=DEFAULT_REVISION)
     parser.add_argument("--split", default=DEFAULT_SPLIT)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument(
+        "--extra-rows", type=Path, nargs="*", default=[],
+        help="labels.jsonl files from datagen/label.py, appended to the dataset rows.",
+    )
     parser.add_argument("--models", nargs="*", help="Only extract these model ids.")
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--skip-behaviour", action="store_true",
+        help="Skip the short-resample features (slow for gpt-oss-120b when it is offloaded to CPU).",
+    )
     return parser.parse_args()
 
 
@@ -87,12 +119,18 @@ def encode_effort(encoder_id: str, row: dict) -> str:
 
 def main() -> None:
     args = parse_args()
-    from diffmean_probe.features import encode_problem, load_model, release
+    from diffmean_probe.features import behaviour_features, encode_problem, load_model, release
 
     rows = load_rows(args.dataset, args.revision, args.split)
+    for path in args.extra_rows:
+        rows += load_extra_rows(path)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     (args.output_dir / "source.json").write_text(
-        json.dumps({"dataset": args.dataset, "revision": args.revision, "split": args.split}, indent=2)
+        json.dumps(
+            {"dataset": args.dataset, "revision": args.revision, "split": args.split,
+             "extra_rows": [str(path) for path in args.extra_rows], "n_rows": len(rows)},
+            indent=2,
+        )
     )
     model_ids = sorted({row["model_id"] for row in rows})
     if args.models:
@@ -112,11 +150,21 @@ def main() -> None:
                 (problem, effort): encode_problem(tokenizer, model, problem, model_id, effort)
                 for problem, effort in keys
             }
+            behaviour = {} if args.skip_behaviour else {
+                (problem, effort): behaviour_features(tokenizer, model, problem, model_id, effort)
+                for problem, effort in keys
+            }
         finally:
             release(model)
         encoded = [cache[(row["problem"], effort)] for row, effort in zip(rows, efforts)]
+        extra = {}
+        if behaviour:
+            extra["behaviour"] = np.stack(
+                [behaviour[(row["problem"], effort)] for row, effort in zip(rows, efforts)]
+            ).astype(np.float32)
         np.savez(
             path,
+            **extra,
             model_id=np.asarray(model_id),
             last=np.stack([item["last"] for item in encoded]).astype(np.float32),
             mean=np.stack([item["mean"] for item in encoded]).astype(np.float32),

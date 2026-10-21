@@ -25,9 +25,24 @@ CONFIG_NAME = "config.json"
 
 
 @dataclass(frozen=True)
+class Behaviour:
+    """Direction over standardized short-resample features."""
+
+    mean: np.ndarray
+    std: np.ndarray
+    direction: Direction
+
+    def score(self, values: np.ndarray) -> np.ndarray:
+        """Unit-variance score for (n, n_features) raw features -> (n,)."""
+        standardized = (np.asarray(values, dtype=np.float64) - self.mean) / self.std
+        return self.direction.score(standardized[:, None, :])
+
+
+@dataclass(frozen=True)
 class ModelDirections:
     layers: list[int]
     direction: Direction
+    behaviour: Behaviour | None = None
 
 
 def validate_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -61,8 +76,21 @@ def load_config(directory: Path = ARTIFACT_DIR) -> dict[str, Any] | None:
 def save_directions(model_id: str, entry: ModelDirections, directory: Path = ARTIFACT_DIR) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{safe_model_id(model_id)}.npz"
+    behaviour = {}
+    if entry.behaviour is not None:
+        b = entry.behaviour
+        behaviour = {
+            "b_mean": b.mean.astype(np.float64),
+            "b_std": b.std.astype(np.float64),
+            "b_unit": b.direction.unit.astype(np.float64),
+            "b_center": b.direction.center.astype(np.float64),
+            "b_scale": b.direction.scale.astype(np.float64),
+            "b_target_scale": np.asarray(b.direction.target_scale, dtype=np.float64),
+            "b_combined_scale": np.asarray(b.direction.combined_scale, dtype=np.float64),
+        }
     np.savez_compressed(
         path,
+        **behaviour,
         model_id=np.asarray(model_id),
         layers=np.asarray(entry.layers, dtype=np.int64),
         unit=entry.direction.unit.astype(np.float32),
@@ -85,8 +113,22 @@ def load_directions(model_id: str, directory: Path = ARTIFACT_DIR) -> ModelDirec
         layers = [int(layer) for layer in data["layers"]]
         if unit.ndim != 2 or unit.shape[0] != len(layers):
             raise RuntimeError(f"{path.name} has inconsistent direction shapes")
+        behaviour = None
+        if "b_unit" in data.files:
+            behaviour = Behaviour(
+                mean=data["b_mean"],
+                std=data["b_std"],
+                direction=Direction(
+                    unit=data["b_unit"],
+                    center=data["b_center"],
+                    scale=data["b_scale"],
+                    target_scale=float(data["b_target_scale"]),
+                    combined_scale=float(data["b_combined_scale"]),
+                ),
+            )
         return ModelDirections(
             layers=layers,
+            behaviour=behaviour,
             direction=Direction(
                 unit=unit,
                 center=data["center"],

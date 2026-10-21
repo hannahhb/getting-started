@@ -182,7 +182,7 @@ class InferenceTest(unittest.TestCase):
             with mock.patch("builtins.print"):
                 TRAINING.main(["--features-dir", str(features_dir), "--output-dir", str(output_dir),
                                "--repeats", "1"])
-            with mock.patch.object(inference, "_scores", return_value=np.array([-50.0, 50.0, 0.0])):
+            with mock.patch.object(inference, "_scores", return_value=(np.array([-50.0, 50.0, 0.0]), np.zeros(3))):
                 predictions = inference.predict_robustness("org/a", "default", ["x", "y", "z"], output_dir)
             self.assertEqual(predictions[:2], [True, False])
             with mock.patch.object(inference, "_scores", side_effect=RuntimeError("oom")):
