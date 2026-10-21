@@ -49,11 +49,12 @@ and train the older per-model probe.
 
 ## Data rules
 
-The competition paper (arXiv 2607.13899, §2.2) forbids extra *labelled* data
-for the perturbation types in the final validation set (rephrase, rename,
-domain, distract, typos, expert perturbations, expert no-solution). Unlabelled
-data, and labels for other perturbation types, are allowed. This solution
-trains only on the organizers' `train-main-v2`.
+A 19 Sep 2026 clarification retired the earlier ban on extra labelled data.
+Test-time perturbation generation is allowed but limited by the 3,600 s
+budget, and any leakage of evaluation data means disqualification. Award
+candidates must make their score reproducible from the technical report alone,
+so every training source must be documented. This solution currently trains
+only on the organizers' `aimo-interp/train-main-v2@fa8af75`.
 
 ## Checked-in artifact
 

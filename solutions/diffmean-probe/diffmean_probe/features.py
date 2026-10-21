@@ -12,6 +12,24 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .common import SITES, format_problem, problem_token_mask
 
+# GPU memory left free for activations when ``device_map="auto"`` places
+# weights; without it the placement can fill a card and the first forward
+# pass runs out of memory.
+ACTIVATION_HEADROOM_BYTES = 6 * 1024**3
+
+
+def _max_memory() -> dict[Any, int] | None:
+    """Per-GPU weight budget: currently free memory minus activation headroom."""
+    budget: dict[Any, int] = {}
+    for index in range(torch.cuda.device_count()):
+        free, _ = torch.cuda.mem_get_info(index)
+        budget[index] = max(free - ACTIVATION_HEADROOM_BYTES, 0)
+    if not budget:
+        return None
+    # Weights that don't fit spill to CPU RAM (slow, but works on smaller GPUs).
+    budget["cpu"] = 1024**4
+    return budget
+
 
 def load_model(model_id: str) -> tuple[Any, Any]:
     """Load tokenizer and model from the offline HF cache."""
@@ -19,12 +37,14 @@ def load_model(model_id: str) -> tuple[Any, Any]:
     if torch.cuda.is_available():
         dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
         device_map: Any = "auto"
+        max_memory = _max_memory()
     else:
-        dtype, device_map = torch.float32, None
+        dtype, device_map, max_memory = torch.float32, None, None
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
         dtype=dtype,
         device_map=device_map,
+        max_memory=max_memory,
         local_files_only=True,
     )
     model.eval()
@@ -84,6 +104,9 @@ def encode_problem(
         output_hidden_states=True,
         return_dict=True,
         use_cache=False,
+        # Only hidden states are needed; full-sequence logits over a ~200k
+        # vocabulary are the largest activation and caused OOM on gpt-oss.
+        logits_to_keep=1,
     )
     hidden_states = output.hidden_states
     selected = range(len(hidden_states)) if layers is None else layers
