@@ -6,14 +6,20 @@
     "n_labelled_rows": 80,
     "n_problems": 36,
     "n_rows": 94,
-    "nested_accuracy": 0.7,
     "prior_only_accuracy": 0.7375,
     "repeats": 10,
     "robust_rate": 0.7375,
-    "selected_accuracy": 0.73875,
-    "selected_accuracy_std": 0.0037499999999999873
+    "selected": [
+      "last",
+      0.3,
+      0.5,
+      0.25
+    ],
+    "selected_accuracy": 0.74875,
+    "selected_accuracy_std": 0.0205015243335709,
+    "shared_features": true
   },
-  "depth_fraction": 0.2,
+  "depth_fraction": 0.3,
   "models_with_directions": [
     "Qwen/Qwen3.5-4B",
     "Skywork/Skywork-OR1-Math-7B",
@@ -22,7 +28,7 @@
     "openai/gpt-oss-120b"
   ],
   "priors": {
-    "mean": 0.12829787234042553,
+    "mean": 0.12829787234042556,
     "models": {
       "Qwen/Qwen3.5-4B": {
         "efforts": {
@@ -61,5 +67,5 @@
   "schema_version": 2,
   "site": "last",
   "target": "max_drop",
-  "threshold": 0.35
+  "threshold": 0.25
 }

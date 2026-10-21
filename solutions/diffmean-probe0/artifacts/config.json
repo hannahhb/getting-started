@@ -1,0 +1,65 @@
+{
+  "beta": 0.5,
+  "cv": {
+    "always_false": 0.26249999999999996,
+    "always_true": 0.7375,
+    "n_labelled_rows": 80,
+    "n_problems": 36,
+    "n_rows": 94,
+    "nested_accuracy": 0.7,
+    "prior_only_accuracy": 0.7375,
+    "repeats": 10,
+    "robust_rate": 0.7375,
+    "selected_accuracy": 0.73875,
+    "selected_accuracy_std": 0.0037499999999999873
+  },
+  "depth_fraction": 0.2,
+  "models_with_directions": [
+    "Qwen/Qwen3.5-4B",
+    "Skywork/Skywork-OR1-Math-7B",
+    "allenai/Olmo-3-7B-Think",
+    "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B",
+    "openai/gpt-oss-120b"
+  ],
+  "priors": {
+    "mean": 0.12829787234042553,
+    "models": {
+      "Qwen/Qwen3.5-4B": {
+        "efforts": {
+          "default": 0.13700465425531919
+        },
+        "mean": 0.13603723404255322
+      },
+      "Skywork/Skywork-OR1-Math-7B": {
+        "efforts": {
+          "default": 0.1674504895825664
+        },
+        "mean": 0.16332916145181475
+      },
+      "allenai/Olmo-3-7B-Think": {
+        "efforts": {
+          "default": 0.10078605200945627
+        },
+        "mean": 0.10471631205673759
+      },
+      "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B": {
+        "efforts": {
+          "default": 0.11634160756501183
+        },
+        "mean": 0.11804964539007094
+      },
+      "openai/gpt-oss-120b": {
+        "efforts": {
+          "high": 0.10516296966953372,
+          "low": 0.11432593933906746,
+          "medium": 0.14015520920907973
+        },
+        "mean": 0.12162969669533727
+      }
+    }
+  },
+  "schema_version": 2,
+  "site": "last",
+  "target": "max_drop",
+  "threshold": 0.35
+}
