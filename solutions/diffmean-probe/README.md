@@ -104,6 +104,11 @@ pipeline in `datagen/` builds them in the `train-main-v2` schema:
 3. `sample.py`: each target model answers every original 8 times and every
    variant 4 times, at temperature 1.0 with up to 16k tokens; truncated
    answers count as wrong.
+   For a shorter run, `datagen/sample_vllm.slurm` samples one model on the
+   first 100 problems with 4/2 samples and 8k tokens
+   (`sbatch datagen/sample_vllm.slurm <model-id>`). `--backend openrouter`
+   samples through OpenRouter instead (key in `OPENROUTER_API_KEY`), which is
+   how gpt-oss-120b is sampled; it records the serving provider per sample.
 4. `label.py`: `max_drop = max over types (base accuracy - type accuracy)`,
    labelled with the 0.10/0.25 thresholds. Problems with base accuracy below
    0.5 are dropped, following the organizers' rule of dropping rows where the
