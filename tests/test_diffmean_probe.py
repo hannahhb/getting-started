@@ -63,6 +63,36 @@ def write_synthetic_features(directory: Path, signal: float, seed: int = 0) -> N
         )
 
 
+def write_shared_features(directory: Path, signal: float, seed: int = 0) -> None:
+    """Three models labelling the same 20 problems; every model reads every row.
+
+    Fragility is a property of the problem (shared across models), and each
+    encoder carries it on layers 1-3 of its own hidden space.
+    """
+    rng = np.random.default_rng(seed)
+    models = (("org/a", 8), ("org/b", 6), ("org/c", 5))
+    problems = [f"problem {i}" for i in range(20)]
+    fragile = np.arange(len(problems)) % 3 == 0
+    rows = [(m, p, k) for m, _ in models for k, p in enumerate(problems)]
+    max_drop = np.asarray([0.5 if fragile[k] else 0.0 for _, _, k in rows]) + rng.normal(0, 0.02, len(rows))
+    max_drop = np.clip(max_drop, 0.0, 1.0).round(2)
+    label = np.where(max_drop <= 0.10, 1, np.where(max_drop >= 0.25, 0, -1)).astype(np.int8)
+    for model_id, dim in models:
+        last = rng.normal(size=(len(rows), 5, dim)).astype(np.float32)
+        last[:, 1:4, 0] += signal * np.asarray([1.0 if fragile[k] else -1.0 for _, _, k in rows])[:, None]
+        np.savez(
+            directory / f"{model_id.replace('/', '_')}.npz",
+            model_id=np.asarray(model_id),
+            last=last,
+            mean=rng.normal(size=last.shape).astype(np.float32),
+            row_model_id=np.asarray([m for m, _, _ in rows]),
+            problem=np.asarray([p for _, p, _ in rows]),
+            reasoning_effort=np.asarray(["default"] * len(rows)),
+            max_drop=max_drop,
+            label=label,
+        )
+
+
 class ScoringTest(unittest.TestCase):
     def test_direction_tracks_target(self) -> None:
         rng = np.random.default_rng(0)
@@ -72,6 +102,7 @@ class ScoringTest(unittest.TestCase):
         direction = fit_direction(features, targets)
         self.assertGreater(np.corrcoef(direction.score(features), targets)[0, 1], 0.9)
         self.assertAlmostEqual(direction.target_scale, float(targets.std()))
+        self.assertAlmostEqual(float(direction.score(features).std()), 1.0)
 
     def test_direction_requires_varying_target(self) -> None:
         self.assertIsNone(fit_direction(np.ones((6, 1, 3)), np.zeros(6)))
@@ -99,33 +130,49 @@ class ScoringTest(unittest.TestCase):
 
 
 class TrainingTest(unittest.TestCase):
-    def run_training(self, signal: float) -> tuple[dict, Path, tempfile.TemporaryDirectory]:
+    def run_training(self, writer, signal: float, *extra: str):
         workdir = tempfile.TemporaryDirectory()
         features_dir, output_dir = Path(workdir.name) / "features", Path(workdir.name) / "artifacts"
         features_dir.mkdir()
-        write_synthetic_features(features_dir, signal)
-        with mock.patch("builtins.print"):
-            summary = TRAINING.main(
-                ["--features-dir", str(features_dir), "--output-dir", str(output_dir), "--repeats", "2"]
-            )
+        writer(features_dir, signal)
+        args = ["--features-dir", str(features_dir), "--output-dir", str(output_dir),
+                "--repeats", "2", "--outer-repeats", "1", *extra]
+        with mock.patch("builtins.print"), mock.patch("sys.stderr"):
+            summary = TRAINING.main(args)
         return summary, output_dir, workdir
 
-    def test_signal_is_selected_and_exported(self) -> None:
-        summary, output_dir, workdir = self.run_training(signal=4.0)
+    def test_own_rows_signal_is_selected_and_exported(self) -> None:
+        summary, output_dir, workdir = self.run_training(write_synthetic_features, 4.0, "--no-gate")
         with workdir:
             config = load_config(output_dir)
+            self.assertFalse(summary["shared_features"])
             self.assertEqual(config["site"], "last")
             self.assertEqual(config["target"], "max_drop")
             self.assertGreater(config["beta"], 0.0)
             self.assertGreater(summary["selected_accuracy"], summary["prior_only_accuracy"])
-            entry = load_directions("org/a", output_dir)
-            self.assertIn(2, entry.layers)
+            self.assertIn(2, load_directions("org/a", output_dir).layers)
 
-    def test_noise_does_not_beat_prior_by_construction(self) -> None:
-        summary, output_dir, workdir = self.run_training(signal=0.0)
+    def test_shared_probe_learns_from_other_models_and_passes_gate(self) -> None:
+        summary, output_dir, workdir = self.run_training(write_shared_features, 3.0)
         with workdir:
-            self.assertGreaterEqual(summary["selected_accuracy"], summary["prior_only_accuracy"])
-            json.dumps(load_config(output_dir))
+            self.assertTrue(summary["shared_features"])
+            self.assertTrue(summary["gate_passed"])
+            self.assertGreater(summary["nested_accuracy"], summary["always_true"])
+            config = load_config(output_dir)
+            self.assertGreater(config["beta"], 0.0)
+            self.assertEqual(sorted(config["models_with_directions"]), ["org/a", "org/b", "org/c"])
+
+    def test_gate_exports_prior_only_when_nested_cv_does_not_beat_baseline(self) -> None:
+        summary, output_dir, workdir = self.run_training(write_shared_features, 0.0)
+        with workdir:
+            self.assertFalse(summary.get("gate_passed", False))
+            self.assertEqual(load_config(output_dir)["beta"], 0.0)
+            self.assertEqual(list(output_dir.glob("*.npz")), [])
+
+    def test_sign_test(self) -> None:
+        self.assertEqual(TRAINING.sign_test_p(0, 0), 1.0)
+        self.assertAlmostEqual(TRAINING.sign_test_p(3, 0), 0.125)
+        self.assertAlmostEqual(TRAINING.sign_test_p(1, 1), 0.75)
 
 
 class InferenceTest(unittest.TestCase):
@@ -141,7 +188,8 @@ class InferenceTest(unittest.TestCase):
             features_dir.mkdir()
             write_synthetic_features(features_dir, signal=4.0)
             with mock.patch("builtins.print"):
-                TRAINING.main(["--features-dir", str(features_dir), "--output-dir", str(output_dir), "--repeats", "1"])
+                TRAINING.main(["--features-dir", str(features_dir), "--output-dir", str(output_dir),
+                               "--repeats", "1", "--outer-repeats", "1", "--no-gate"])
             with mock.patch.object(inference, "_scores", return_value=np.array([-50.0, 50.0, 0.0])):
                 predictions = inference.predict_robustness("org/a", "default", ["x", "y", "z"], output_dir)
             self.assertEqual(predictions[:2], [True, False])

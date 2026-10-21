@@ -1,8 +1,20 @@
 # Mean-Difference Probe on max_drop (Phase 0)
 
-A low-variance representation probe for the competition models. It is the
-first step of a larger plan; later phases add perturbation-steering
+A low-variance representation probe for the competition models, trained as a
+**shared probe**: each model's direction learns from every model's labels.
+It is the first step of a larger plan; later phases add perturbation-steering
 sensitivity features on top of it.
+
+## Shared probe
+
+Robustness is mostly a property of the problem. In `train-main-v2`, of the 15
+problems labelled for two or more models, 14 are robust for all of them or
+for none. So every model reads all 94 training rows (36 problems), and each
+model's direction is fitted on all of them, with the target
+`max_drop - prior(row's model, effort)`. At evaluation time a model is still
+scored only from its own activations. This gives each direction ~94 rows
+instead of 10–45. Feature files that hold only a model's own rows still load
+and train the older per-model probe.
 
 ## What changes relative to the baselines
 
@@ -22,13 +34,14 @@ sensitivity features on top of it.
    comparable across models:
 
    ```text
-   drop_hat = prior(model, effort) + beta * std(max_drop | model) * mean_z(3 layers at depth f)
+   drop_hat = prior(model, effort) + beta * std(residual | model) * z(3 layers at depth f)
    robust   = drop_hat < threshold
    ```
 
-   `site` (last prompt token or problem-span mean), `f`, `beta`, and
-   `threshold` are shared across models and chosen by grouped CV over all
-   models. `beta` acts as the out-of-sample correlation, and `beta = 0` (prior
+   `site` (last prompt token or problem-span mean), `f` in {0.3, 0.5, 0.7},
+   `beta` in {0, 0.3, 0.5}, and `threshold` in {0.175, 0.25} are shared
+   across models and chosen by grouped CV over all models. The grid is kept
+   small because a 648-setting search overfit the inner CV. `beta` acts as the out-of-sample correlation, and `beta = 0` (prior
    only) is part of the grid.
 5. **Honest validation.** Rows are grouped by problem text *across models*
    (the 5 models share problems), and `--nested` reports an outer-loop estimate
@@ -48,29 +61,56 @@ trains only on the organizers' `train-main-v2`.
 `aimo-interp/train-main-v2@fa8af75` (94 rows, 80 labelled, 36 problems, 73.75%
 of labelled rows robust). Every prior mean is below the selected threshold, so
 this artifact is the same as always-True on that data. It is a valid fallback;
-the representation part needs the GPU steps below.
+the representation part needs the GPU steps below. Training overwrites
+`artifacts/`, and its `cv` block records whether the gate passed.
 
 ## Reproduce on a GPU (1–2 A100 80GB)
 
 ```bash
-# 1. Cache every-layer features for the four small models (bf16, minutes each).
+# 1. Every model reads every training problem (36 prompts per model, minutes each).
 uv run solutions/diffmean-probe/scripts/extract_features.py \
   --models Qwen/Qwen3.5-4B Skywork/Skywork-OR1-Math-7B \
            allenai/Olmo-3-7B-Think deepseek-ai/DeepSeek-R1-0528-Qwen3-8B
 
 # 2. Optional: gpt-oss-120b. On A100, MXFP4 may dequantize to bf16 (~240 GB);
-#    device_map="auto" then offloads to CPU, which is slow but fine for 45 prompts.
+#    device_map="auto" then offloads to CPU, which is slow but fine for 60 prompts.
 uv run solutions/diffmean-probe/scripts/extract_features.py --models openai/gpt-oss-120b
 
-# 3. Select by grouped CV, report the nested estimate, and export.
+# 3. Select by grouped CV, run the gate, and export.
 uv run solutions/diffmean-probe/scripts/train_diffmean.py \
-  --features-dir data/diffmean-probe/features --nested
+  --features-dir data/diffmean-probe/features-shared
 ```
 
-Compare `nested_accuracy` against `always_true` in the printed summary. Ship
-the representation artifact only if it beats the prior out of sample. Models
-whose directions cannot be fitted (fewer than 4 rows, or a constant target)
-fall back to their prior at inference time, and so does a failed forward pass.
+Features now go to `data/diffmean-probe/features-shared/`, so the older
+own-rows files in `features/` are not overwritten.
+
+## Ship gate
+
+The training script only exports a representation artifact if a repeated
+nested CV (3 outer repeats) shows it beating the best prior-only rule
+(always-True on this data) by:
+
+- at least `--min-gain` accuracy (default 0.0125, one row in 80), **and**
+- a sign test on rows it gets right where always-True is wrong, and the
+  reverse, with p at most `--max-p` (default 0.2).
+
+Otherwise it prints `GATE FAILED` and exports the prior-only artifact. Pure
+noise in the tests wins 3 rows and loses 2 (p = 0.5), which is why a
+one-row edge is not enough. With 80 rows no gate can promise a leaderboard
+gain; it only refuses changes that the data cannot support. `--no-gate`
+exports the selection anyway, for experiments.
+
+Results so far:
+
+| Setup | Nested accuracy | vs always-True (0.7375) |
+|---|---|---|
+| Per-model probe, own rows only | 0.70 | 0 wins, 8 losses: fails |
+| Shared labels, gpt-oss features for all models (preview, 64 of 80 rows covered) | 0.741 | 3 wins, 2 losses, p = 0.5: fails |
+| Shared probe, each model's own features | not run yet | needs step 1 |
+
+Models whose directions cannot be fitted (fewer than 4 rows, or a constant
+target) fall back to their prior at inference time, and so does a failed
+forward pass.
 
 ## Inference cost
 

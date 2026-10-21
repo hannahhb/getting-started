@@ -1,22 +1,28 @@
 {
-  "beta": 0.0,
+  "beta": 0.5,
   "cv": {
     "always_false": 0.26249999999999996,
     "always_true": 0.7375,
     "n_labelled_rows": 80,
     "n_problems": 36,
     "n_rows": 94,
-    "nested_accuracy": 0.7375,
+    "nested_accuracy": 0.7,
     "prior_only_accuracy": 0.7375,
     "repeats": 10,
     "robust_rate": 0.7375,
-    "selected_accuracy": 0.7375,
-    "selected_accuracy_std": 0.0
+    "selected_accuracy": 0.73875,
+    "selected_accuracy_std": 0.0037499999999999873
   },
-  "depth_fraction": 0.5,
-  "models_with_directions": [],
+  "depth_fraction": 0.2,
+  "models_with_directions": [
+    "Qwen/Qwen3.5-4B",
+    "Skywork/Skywork-OR1-Math-7B",
+    "allenai/Olmo-3-7B-Think",
+    "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B",
+    "openai/gpt-oss-120b"
+  ],
   "priors": {
-    "mean": 0.12829787234042556,
+    "mean": 0.12829787234042553,
     "models": {
       "Qwen/Qwen3.5-4B": {
         "efforts": {
@@ -55,5 +61,5 @@
   "schema_version": 2,
   "site": "last",
   "target": "max_drop",
-  "threshold": 0.25
+  "threshold": 0.35
 }

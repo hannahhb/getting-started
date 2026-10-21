@@ -69,6 +69,7 @@ def save_directions(model_id: str, entry: ModelDirections, directory: Path = ART
         center=entry.direction.center.astype(np.float64),
         scale=entry.direction.scale.astype(np.float64),
         target_scale=np.asarray(entry.direction.target_scale, dtype=np.float64),
+        combined_scale=np.asarray(entry.direction.combined_scale, dtype=np.float64),
     )
     return path
 
@@ -91,5 +92,6 @@ def load_directions(model_id: str, directory: Path = ARTIFACT_DIR) -> ModelDirec
                 center=data["center"],
                 scale=data["scale"],
                 target_scale=float(data["target_scale"]),
+                combined_scale=float(data["combined_scale"]) if "combined_scale" in data.files else 1.0,
             ),
         )

@@ -6,8 +6,9 @@ model and layer, the direction is the covariance between hidden state and
 target, ``sum_i (h_i - mean_h) * (y_i - mean_y)``. This is the regression
 analogue of diff-in-means (one-component PLS); it can use the unlabelled-band
 rows that a binary diff-in-means must discard. Projections are standardized
-on the training rows, so ``z`` has zero mean and unit variance per layer,
-and the layer scores are averaged.
+on the training rows, so ``z`` has zero mean and unit variance per layer;
+the layer scores are averaged and the average is rescaled to unit variance,
+so ``beta`` keeps its meaning as a correlation.
 
 The predicted drop shrinks toward a hierarchical prior::
 
@@ -22,7 +23,7 @@ The threshold is also picked by CV for plain accuracy, the leaderboard metric.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -34,17 +35,24 @@ MIN_ROWS = 4
 
 @dataclass(frozen=True)
 class Direction:
-    """Unit directions (k, d) with per-layer projection mean/std, plus target std."""
+    """Unit directions (k, d) with per-layer projection mean/std, plus target std.
+
+    ``combined_scale`` is the training std of the layer-averaged score.
+    """
 
     unit: np.ndarray
     center: np.ndarray
     scale: np.ndarray
     target_scale: float
+    combined_scale: float = 1.0
 
-    def score(self, features: np.ndarray) -> np.ndarray:
-        """Mean standardized projection; ``features`` is (n, k, d) -> (n,)."""
+    def layer_mean(self, features: np.ndarray) -> np.ndarray:
         projections = np.einsum("nkd,kd->nk", features.astype(np.float64), self.unit)
         return ((projections - self.center) / self.scale).mean(axis=1)
+
+    def score(self, features: np.ndarray) -> np.ndarray:
+        """Unit-variance layer-averaged projection; ``features`` is (n, k, d) -> (n,)."""
+        return self.layer_mean(features) / self.combined_scale
 
 
 def fit_direction(features: np.ndarray, targets: np.ndarray) -> Direction | None:
@@ -62,12 +70,14 @@ def fit_direction(features: np.ndarray, targets: np.ndarray) -> Direction | None
     unit = covariance / norms
     projections = np.einsum("nkd,kd->nk", features, unit)
     scale = projections.std(axis=0)
-    return Direction(
+    direction = Direction(
         unit=unit,
         center=projections.mean(axis=0),
         scale=np.where(scale > 0, scale, 1.0),
         target_scale=target_scale,
     )
+    combined = float(direction.layer_mean(features).std())
+    return replace(direction, combined_scale=combined if combined > 0 else 1.0)
 
 
 def _shrunk(values: Sequence[float], parent: float) -> float:

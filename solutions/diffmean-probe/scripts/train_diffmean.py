@@ -1,15 +1,30 @@
 #!/usr/bin/env python3
-"""Select site, depth, beta, and threshold by grouped CV, then export the artifact.
+"""Train the shared probe, select it by grouped CV, gate it, and export.
 
-The regression target is ``max_drop``. All rows train the directions and
-priors, including the unlabelled band (0.10 < max_drop < 0.25), but only
-labelled rows are scored.
+**Shared probe.** Robustness is mostly a property of the problem: a problem
+that breaks one model usually breaks the others. So each model's direction is
+fitted on *every* model's labelled problems, read through that model's own
+hidden states. The target is the residual ``max_drop - prior(row)``, so the
+direction learns which problems are fragile beyond each model's base rate. At
+evaluation time, a model is still scored only from its own activations.
 
-Rows are grouped by problem text across models, so a problem never appears in
-both the training and held-out side of a split. Selection maximises plain
-accuracy, the leaderboard metric. ``--nested`` additionally reports an honest
-outer-loop estimate of the whole selection procedure, which matters with only
-~80 labelled rows: the best inner-CV score is optimistically biased.
+Feature files from ``extract_features.py`` hold every row read by every model.
+Older files that hold only a model's own rows still load; each model then
+trains on its own rows only (the per-model probe).
+
+**Selection.** Rows are grouped by problem text across models, so no problem's
+labels leak between the training and held-out sides. Site, depth, beta, and
+threshold are picked for plain accuracy on labelled rows; all rows, including
+the unlabelled band (0.10 < max_drop < 0.25), train directions and priors.
+
+**Gate.** The best inner-CV score is optimistically biased, so a repeated
+nested CV estimates the whole selection procedure. The representation artifact
+is exported only if its nested accuracy beats the best prior-only rule (which
+is always-True on ``train-main-v2``) by at least ``--min-gain`` *and* a sign
+test of its row-level wins and losses against always-True gives p at most
+``--max-p``. Otherwise a prior-only artifact
+is exported and the run says why. With ~80 rows no gate can guarantee a
+leaderboard gain; this one only refuses changes the data cannot support.
 
 ``--priors-only`` skips features and exports a prior-only artifact.
 """
@@ -18,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -48,45 +64,84 @@ from diffmean_probe.scoring import (  # noqa: E402
     prior_mean,
 )
 
-DEPTHS = tuple(round(0.1 * step, 1) for step in range(1, 10))
-BETAS = (0.0, 0.1, 0.2, 0.3, 0.5, 0.7)
+# A small grid: with ~80 labelled rows, a wide search overfits the inner CV
+# (648 configs gave inner 0.77 but nested 0.73 in a gpt-oss proxy run).
+DEPTHS = (0.3, 0.5, 0.7)
+BETAS = (0.0, 0.3, 0.5)
 # Labels are robust at max_drop <= 0.10 and not robust at >= 0.25.
-THRESHOLDS = (0.10, 0.15, 0.175, 0.20, 0.25, 0.35)
+THRESHOLDS = (0.175, 0.25)
+# One labelled row out of 80; the gate needs at least this much nested gain.
+DEFAULT_MIN_GAIN = 0.0125
+# Sign-test p-value the gate needs against always-True. A 3-2 edge (p = 0.5)
+# is what pure noise produces in the tests, so it must not pass.
+DEFAULT_MAX_P = 0.2
 Config = tuple[str, float, float, float]  # site, depth, beta, threshold
 
 
 @dataclass
 class Dataset:
-    model_ids: list[str]
+    model_ids: list[str]  # model whose robustness each row labels
     efforts: list[str]
     problems: list[str]
     targets: np.ndarray  # max_drop, float
     labels: np.ndarray  # 1 robust, 0 not robust, -1 unlabelled band
-    # Per model: global row indices and {site: (n_model_rows, n_hidden_states, d)}.
-    rows_by_model: dict[str, np.ndarray]
+    # Per encoder model: {site: (n_rows, n_hidden_states, d)} and the rows it has read.
     features: dict[str, dict[str, np.ndarray]]
+    available: dict[str, np.ndarray]
+
+
+def _row_keys(data) -> list[tuple[str, str, str]]:
+    if "row_model_id" in data.files:
+        owners = [str(value) for value in data["row_model_id"]]
+    else:
+        owners = [str(data["model_id"])] * len(data["max_drop"])
+    return [(m, str(p), str(e)) for m, p, e in zip(owners, data["problem"], data["reasoning_effort"])]
 
 
 def load_feature_dataset(features_dir: Path) -> Dataset:
-    model_ids, efforts, problems, targets, labels = [], [], [], [], []
-    rows_by_model, features = {}, {}
-    for path in sorted(features_dir.glob("*.npz")):
-        with np.load(path, allow_pickle=False) as data:
-            model_id = str(data["model_id"])
-            start = len(model_ids)
-            count = len(data["max_drop"])
-            model_ids += [model_id] * count
-            efforts += [str(value) for value in data["reasoning_effort"]]
-            problems += [str(value) for value in data["problem"]]
-            targets += [float(value) for value in data["max_drop"]]
-            labels += [int(value) for value in data["label"]]
-            rows_by_model[model_id] = np.arange(start, start + count)
-            features[model_id] = {site: data[site].astype(np.float32) for site in SITES}
-    if not model_ids:
+    """Load shared feature files, or older own-rows-only files."""
+    paths = sorted(features_dir.glob("*.npz"))
+    if not paths:
         raise SystemExit(f"no feature files found in {features_dir}")
+    files = [np.load(path, allow_pickle=False) for path in paths]
+    try:
+        shared = all("row_model_id" in data.files for data in files)
+        sources = files[:1] if shared else files
+        table = [
+            (key, float(target), int(label))
+            for data in sources
+            for key, target, label in zip(_row_keys(data), data["max_drop"], data["label"])
+        ]
+        index = {key: i for i, (key, _, _) in enumerate(table)}
+        if len(index) != len(table):
+            raise SystemExit("feature files contain duplicate (model, problem, effort) rows")
+
+        features, available = {}, {}
+        for data in files:
+            encoder = str(data["model_id"])
+            rows = [index[key] for key in _row_keys(data)]
+            if shared and rows != list(range(len(table))):
+                raise SystemExit(f"{encoder}: rows are not in the shared order; re-run extraction")
+            available[encoder] = np.zeros(len(table), dtype=bool)
+            available[encoder][rows] = True
+            features[encoder] = {}
+            for site in SITES:
+                values = data[site].astype(np.float32)
+                full = np.zeros((len(table),) + values.shape[1:], dtype=np.float32)
+                full[rows] = values
+                features[encoder][site] = full
+    finally:
+        for data in files:
+            data.close()
+
     return Dataset(
-        model_ids, efforts, problems, np.asarray(targets), np.asarray(labels, dtype=np.int8),
-        rows_by_model, features,
+        model_ids=[key[0] for key, _, _ in table],
+        problems=[key[1] for key, _, _ in table],
+        efforts=[key[2] for key, _, _ in table],
+        targets=np.asarray([target for _, target, _ in table]),
+        labels=np.asarray([label for _, _, label in table], dtype=np.int8),
+        features=features,
+        available=available,
     )
 
 
@@ -104,49 +159,47 @@ def load_label_dataset() -> Dataset:
         problems=[row["problem"] for row in rows],
         targets=np.asarray([row["max_drop"] for row in rows], dtype=np.float64),
         labels=np.asarray([row["label"] for row in rows], dtype=np.int8),
-        rows_by_model={},
         features={},
+        available={},
     )
 
 
 def configs(has_features: bool) -> list[Config]:
-    if not has_features:
-        return [("last", 0.5, 0.0, threshold) for threshold in THRESHOLDS]
-    return [
-        (site, depth, beta, threshold)
-        for site in SITES
-        for depth in DEPTHS
-        for beta in BETAS
-        for threshold in THRESHOLDS
-    ]
+    sites = SITES if has_features else ("last",)
+    depths = DEPTHS if has_features else (0.5,)
+    betas = BETAS if has_features else (0.0,)
+    return [(s, d, b, t) for s in sites for d in depths for b in betas for t in THRESHOLDS]
 
 
-def fold_scores(
-    data: Dataset, train: np.ndarray, test: np.ndarray
-) -> dict[tuple[str, float], tuple[np.ndarray, np.ndarray]]:
-    """Held-out ``(z, target_scale)`` per (site, depth); zeros where no direction fits."""
-    train_set = set(train.tolist())
-    position = {row: i for i, row in enumerate(test)}
+def row_priors(data: Dataset, priors: dict, rows: np.ndarray) -> np.ndarray:
+    return np.asarray([prior_mean(priors, data.model_ids[i], data.efforts[i]) for i in rows])
+
+
+def fit_encoder(data: Dataset, encoder: str, site: str, depth: float, train: np.ndarray, priors: dict):
+    """Fit ``encoder``'s direction on the residuals of every training row it has read."""
+    rows = train[data.available[encoder][train]]
+    site_features = data.features[encoder][site]
+    layers = layer_window(site_features.shape[1], depth)
+    residuals = data.targets[rows] - row_priors(data, priors, rows)
+    return layers, fit_direction(site_features[rows][:, layers], residuals)
+
+
+def fold_scores(data: Dataset, train: np.ndarray, test: np.ndarray, priors: dict) -> dict:
+    """Held-out ``(z, target_scale)`` per (site, depth); each row uses its own model's encoder."""
+    owners = np.asarray([data.model_ids[i] for i in test])
     scores = {}
     for site in SITES if data.features else ():
         for depth in DEPTHS:
             z, target_scale = np.zeros(len(test)), np.zeros(len(test))
-            for model_id, rows in data.rows_by_model.items():
-                local_train = [i for i, row in enumerate(rows) if row in train_set]
-                local_test = [i for i, row in enumerate(rows) if row in position]
-                if not local_test:
+            for encoder in data.features:
+                local = np.flatnonzero((owners == encoder) & data.available[encoder][test])
+                if not len(local):
                     continue
-                site_features = data.features[model_id][site]
-                layers = layer_window(site_features.shape[1], depth)
-                direction = fit_direction(
-                    site_features[local_train][:, layers], data.targets[rows[local_train]]
-                )
+                layers, direction = fit_encoder(data, encoder, site, depth, train, priors)
                 if direction is None:
                     continue
-                held_out = direction.score(site_features[local_test][:, layers])
-                for i, value in zip(local_test, held_out):
-                    z[position[rows[i]]] = value
-                    target_scale[position[rows[i]]] = direction.target_scale
+                z[local] = direction.score(data.features[encoder][site][test[local]][:, layers])
+                target_scale[local] = direction.target_scale
             scores[(site, depth)] = (z, target_scale)
     return scores
 
@@ -155,8 +208,8 @@ def fold_predictions(data: Dataset, train: np.ndarray, test: np.ndarray, grid: l
     priors = fit_priors(
         [data.model_ids[i] for i in train], [data.efforts[i] for i in train], data.targets[train]
     )
-    prior = np.asarray([prior_mean(priors, data.model_ids[i], data.efforts[i]) for i in test])
-    scores = fold_scores(data, train, test)
+    prior = row_priors(data, priors, test)
+    scores = fold_scores(data, train, test, priors)
     zeros = (np.zeros(len(test)), np.zeros(len(test)))
     predictions = {}
     for site, depth, beta, threshold in grid:
@@ -206,33 +259,65 @@ def select(grid: dict[Config, float]) -> Config:
     )
 
 
-def nested_estimate(data: Dataset, repeats: int, n_splits: int, seed: int) -> float:
-    """Outer grouped-CV accuracy of running :func:`select` on each outer training set."""
+def nested_predictions(data: Dataset, repeats: int, n_splits: int, seed: int) -> np.ndarray:
+    """Outer grouped-CV predictions from running :func:`select` on each outer training set."""
     everything = np.arange(len(data.labels))
     groups = np.asarray(data.problems)
     predictions = np.zeros(len(everything), dtype=bool)
-    splitter = splitter_for(data.labels, groups, n_splits, seed + 1000)
+    splitter = splitter_for(data.labels, groups, n_splits, seed)
     for train, test in splitter.split(everything, data.labels, groups):
         config = select(evaluate_grid(data, train, repeats, n_splits, seed)["grid"])
         predictions[test] = fold_predictions(data, train, test, [config])[config]
+    return predictions
+
+
+def sign_test_p(wins: int, losses: int) -> float:
+    """One-sided exact binomial p-value for at least ``wins`` of ``wins + losses`` by chance."""
+    n = wins + losses
+    if n == 0:
+        return 1.0
+    return sum(math.comb(n, k) for k in range(wins, n + 1)) / 2**n
+
+
+def nested_report(data: Dataset, outer_repeats: int, inner_repeats: int, n_splits: int, seed: int) -> dict:
+    """Repeated nested CV, compared row by row with always-True.
+
+    Wins and losses are pooled over outer repeats, so the sign test treats
+    repeats as independent and overstates significance; read it as a sanity
+    check, not a guarantee.
+    """
     scored = data.labels >= 0
-    return accuracy(predictions[scored], data.labels[scored] == 1)
+    truth = data.labels[scored] == 1
+    accuracies, wins, losses = [], 0, 0
+    for repeat in range(outer_repeats):
+        predicted = nested_predictions(data, inner_repeats, n_splits, seed + 1000 + repeat)[scored]
+        accuracies.append(accuracy(predicted, truth))
+        correct = predicted == truth
+        wins += int((correct & ~truth).sum())  # always-True is wrong exactly where truth is False
+        losses += int((~correct & truth).sum())
+    return {
+        "nested_accuracy": float(np.mean(accuracies)),
+        "nested_accuracy_runs": [float(value) for value in accuracies],
+        "nested_vs_always_true_wins": wins,
+        "nested_vs_always_true_losses": losses,
+        "nested_vs_always_true_p": sign_test_p(wins, losses),
+    }
 
 
-def export(data: Dataset, config: Config, summary: dict, output_dir: Path) -> None:
+def export(data: Dataset, config: Config, summary: dict, output_dir: Path) -> list[str]:
     site, depth, beta, threshold = config
+    everything = np.arange(len(data.labels))
     priors = fit_priors(data.model_ids, data.efforts, data.targets)
+    output_dir.mkdir(parents=True, exist_ok=True)
     for stale in output_dir.glob("*.npz"):
         stale.unlink()
     exported = []
     if beta != 0.0:
-        for model_id, rows in data.rows_by_model.items():
-            site_features = data.features[model_id][site]
-            layers = layer_window(site_features.shape[1], depth)
-            direction = fit_direction(site_features[:, layers], data.targets[rows])
+        for encoder in data.features:
+            layers, direction = fit_encoder(data, encoder, site, depth, everything, priors)
             if direction is not None:
-                save_directions(model_id, ModelDirections(layers=layers, direction=direction), output_dir)
-                exported.append(model_id)
+                save_directions(encoder, ModelDirections(layers=layers, direction=direction), output_dir)
+                exported.append(encoder)
     save_config(
         {
             "schema_version": SCHEMA_VERSION,
@@ -247,18 +332,28 @@ def export(data: Dataset, config: Config, summary: dict, output_dir: Path) -> No
         },
         output_dir,
     )
+    return exported
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--features-dir", type=Path)
     source.add_argument("--priors-only", action="store_true")
     parser.add_argument("--output-dir", type=Path, default=ARTIFACT_DIR)
-    parser.add_argument("--repeats", type=int, default=10)
+    parser.add_argument("--repeats", type=int, default=10, help="Inner CV repeats.")
     parser.add_argument("--n-splits", type=int, default=5)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--nested", action="store_true", help="Also report a nested-CV estimate.")
+    parser.add_argument("--outer-repeats", type=int, default=3, help="Nested CV repeats for the gate.")
+    parser.add_argument(
+        "--min-gain", type=float, default=DEFAULT_MIN_GAIN,
+        help="Nested accuracy must beat the best prior-only CV accuracy by at least this.",
+    )
+    parser.add_argument(
+        "--max-p", type=float, default=DEFAULT_MAX_P,
+        help="Largest sign-test p-value against always-True that passes the gate.",
+    )
+    parser.add_argument("--no-gate", action="store_true", help="Export the selected config regardless.")
     return parser.parse_args(argv)
 
 
@@ -269,24 +364,49 @@ def main(argv: Sequence[str] | None = None) -> dict:
     everything = np.arange(len(data.labels))
     result = evaluate_grid(data, everything, args.repeats, args.n_splits, args.seed)
     config = select(result["grid"])
+    prior_grid = {c: v for c, v in result["grid"].items() if c[2] == 0.0}
+    prior_config = select(prior_grid)
     labelled = data.labels >= 0
     summary = {
         "n_rows": int(len(data.labels)),
         "n_labelled_rows": int(labelled.sum()),
         "n_problems": len(set(data.problems)),
         "robust_rate": float((data.labels[labelled] == 1).mean()),
+        "shared_features": bool(data.available) and all(mask.all() for mask in data.available.values()),
         "repeats": args.repeats,
+        "selected": list(config),
         "selected_accuracy": result["grid"][config],
         "selected_accuracy_std": result["grid_std"][config],
-        "prior_only_accuracy": max(value for c, value in result["grid"].items() if c[2] == 0.0),
+        "prior_only_accuracy": prior_grid[prior_config],
         **result["reference"],
     }
-    if args.nested:
-        summary["nested_accuracy"] = nested_estimate(data, max(args.repeats // 2, 1), args.n_splits, args.seed)
-    export(data, config, summary, args.output_dir)
+
+    if config[2] != 0.0:
+        summary.update(nested_report(
+            data, args.outer_repeats, max(args.repeats // 2, 1), args.n_splits, args.seed
+        ))
+        bar = summary["prior_only_accuracy"] + args.min_gain
+        summary["gate_bar"] = bar
+        summary["gate_passed"] = bool(
+            summary["nested_accuracy"] >= bar and summary["nested_vs_always_true_p"] <= args.max_p
+        )
+        if not summary["gate_passed"] and not args.no_gate:
+            print(
+                f"GATE FAILED: nested accuracy {summary['nested_accuracy']:.4f} (bar {bar:.4f}), "
+                f"wins/losses vs always-True {summary['nested_vs_always_true_wins']}/"
+                f"{summary['nested_vs_always_true_losses']} (p {summary['nested_vs_always_true_p']:.3f}, "
+                f"max {args.max_p}); exporting the prior-only artifact.",
+                file=sys.stderr,
+            )
+            config = prior_config
+    summary["exported"] = list(config)
+
+    exported = export(data, config, summary, args.output_dir)
     site, depth, beta, threshold = config
     print(json.dumps(
-        {"site": site, "depth_fraction": depth, "beta": beta, "threshold": threshold, **summary}, indent=2
+        {"site": site, "depth_fraction": depth, "beta": beta, "threshold": threshold,
+         "models_with_directions": exported, **summary},
+        indent=2,
     ))
     return summary
 

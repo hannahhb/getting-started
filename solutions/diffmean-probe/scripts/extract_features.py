@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Cache every-layer hidden states for the competition-model training rows.
+"""Cache every-layer hidden states of every training problem, read by every model.
 
-Run on a GPU machine. One ``<safe-model-id>.npz`` per model is written to
-``--output-dir`` with float32 ``last`` and ``mean`` arrays of shape
-``(n_rows, n_hidden_states, hidden)`` plus row metadata (the ``max_drop``
-target and ``label``). Models already present are skipped, so an interrupted run resumes.
+Run on a GPU machine. Each model encodes *all* training rows, not just its
+own, so the shared probe can learn each model's direction from every model's
+labels. One ``<safe-model-id>.npz`` per model is written to ``--output-dir``
+with float32 ``last`` and ``mean`` arrays of shape
+``(n_rows, n_hidden_states, hidden)`` plus row metadata (``row_model_id``,
+the ``max_drop`` target, and ``label``). Rows are in the same order in every
+file. Models already present are skipped, so an interrupted run resumes.
 """
 
 from __future__ import annotations
@@ -27,7 +30,7 @@ from diffmean_probe.common import normalize_effort, safe_model_id  # noqa: E402
 DEFAULT_DATASET = "aimo-interp/train-main-v2"
 DEFAULT_REVISION = "fa8af758c6519fc97a9d0bd9017feb6f12232b52"
 DEFAULT_SPLIT = "train"
-DEFAULT_OUTPUT_DIR = ROOT / "data" / "diffmean-probe" / "features"
+DEFAULT_OUTPUT_DIR = ROOT / "data" / "diffmean-probe" / "features-shared"
 
 
 def load_rows(dataset: str, revision: str, split: str) -> list[dict]:
@@ -71,6 +74,17 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def encode_effort(encoder_id: str, row: dict) -> str:
+    """Effort used when ``encoder_id`` reads ``row``'s problem.
+
+    A model's own rows keep their effort; other models' rows use the
+    encoder's default, which is what it sees at evaluation time.
+    """
+    if row["model_id"] == encoder_id:
+        return row["reasoning_effort"]
+    return normalize_effort(encoder_id, "default")
+
+
 def main() -> None:
     args = parse_args()
     from diffmean_probe.features import encode_problem, load_model, release
@@ -89,25 +103,29 @@ def main() -> None:
         if path.is_file() and not args.overwrite:
             print(f"skip {model_id}: {path} exists")
             continue
-        model_rows = [row for row in rows if row["model_id"] == model_id]
-        print(f"{model_id}: encoding {len(model_rows)} rows")
+        efforts = [encode_effort(model_id, row) for row in rows]
+        keys = sorted({(row["problem"], effort) for row, effort in zip(rows, efforts)})
+        print(f"{model_id}: encoding {len(keys)} prompts for {len(rows)} rows")
         tokenizer, model = load_model(model_id)
         try:
-            encoded = [
-                encode_problem(tokenizer, model, row["problem"], model_id, row["reasoning_effort"])
-                for row in model_rows
-            ]
+            cache = {
+                (problem, effort): encode_problem(tokenizer, model, problem, model_id, effort)
+                for problem, effort in keys
+            }
         finally:
             release(model)
+        encoded = [cache[(row["problem"], effort)] for row, effort in zip(rows, efforts)]
         np.savez(
             path,
             model_id=np.asarray(model_id),
             last=np.stack([item["last"] for item in encoded]).astype(np.float32),
             mean=np.stack([item["mean"] for item in encoded]).astype(np.float32),
-            problem=np.asarray([row["problem"] for row in model_rows]),
-            reasoning_effort=np.asarray([row["reasoning_effort"] for row in model_rows]),
-            max_drop=np.asarray([row["max_drop"] for row in model_rows], dtype=np.float64),
-            label=np.asarray([row["label"] for row in model_rows], dtype=np.int8),
+            row_model_id=np.asarray([row["model_id"] for row in rows]),
+            problem=np.asarray([row["problem"] for row in rows]),
+            reasoning_effort=np.asarray([row["reasoning_effort"] for row in rows]),
+            encode_effort=np.asarray(efforts),
+            max_drop=np.asarray([row["max_drop"] for row in rows], dtype=np.float64),
+            label=np.asarray([row["label"] for row in rows], dtype=np.int8),
         )
         print(f"wrote {path}")
 
