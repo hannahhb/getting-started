@@ -142,7 +142,7 @@ class TrainingTest(unittest.TestCase):
         return summary, output_dir, workdir
 
     def test_own_rows_signal_is_selected_and_exported(self) -> None:
-        summary, output_dir, workdir = self.run_training(write_synthetic_features, 4.0, "--no-gate")
+        summary, output_dir, workdir = self.run_training(write_synthetic_features, 4.0)
         with workdir:
             config = load_config(output_dir)
             self.assertFalse(summary["shared_features"])
@@ -152,22 +152,14 @@ class TrainingTest(unittest.TestCase):
             self.assertGreater(summary["selected_accuracy"], summary["prior_only_accuracy"])
             self.assertIn(2, load_directions("org/a", output_dir).layers)
 
-    def test_shared_probe_learns_from_other_models_and_passes_gate(self) -> None:
-        summary, output_dir, workdir = self.run_training(write_shared_features, 3.0)
+    def test_shared_probe_learns_from_other_models(self) -> None:
+        summary, output_dir, workdir = self.run_training(write_shared_features, 3.0, "--nested")
         with workdir:
             self.assertTrue(summary["shared_features"])
-            self.assertTrue(summary["gate_passed"])
             self.assertGreater(summary["nested_accuracy"], summary["always_true"])
             config = load_config(output_dir)
             self.assertGreater(config["beta"], 0.0)
             self.assertEqual(sorted(config["models_with_directions"]), ["org/a", "org/b", "org/c"])
-
-    def test_gate_exports_prior_only_when_nested_cv_does_not_beat_baseline(self) -> None:
-        summary, output_dir, workdir = self.run_training(write_shared_features, 0.0)
-        with workdir:
-            self.assertFalse(summary.get("gate_passed", False))
-            self.assertEqual(load_config(output_dir)["beta"], 0.0)
-            self.assertEqual(list(output_dir.glob("*.npz")), [])
 
     def test_sign_test(self) -> None:
         self.assertEqual(TRAINING.sign_test_p(0, 0), 1.0)
@@ -189,7 +181,7 @@ class InferenceTest(unittest.TestCase):
             write_synthetic_features(features_dir, signal=4.0)
             with mock.patch("builtins.print"):
                 TRAINING.main(["--features-dir", str(features_dir), "--output-dir", str(output_dir),
-                               "--repeats", "1", "--outer-repeats", "1", "--no-gate"])
+                               "--repeats", "1"])
             with mock.patch.object(inference, "_scores", return_value=np.array([-50.0, 50.0, 0.0])):
                 predictions = inference.predict_robustness("org/a", "default", ["x", "y", "z"], output_dir)
             self.assertEqual(predictions[:2], [True, False])

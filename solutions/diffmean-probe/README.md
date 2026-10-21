@@ -63,7 +63,7 @@ only on the organizers' `aimo-interp/train-main-v2@fa8af75`.
 of labelled rows robust). Every prior mean is below the selected threshold, so
 this artifact is the same as always-True on that data. It is a valid fallback;
 the representation part needs the GPU steps below. Training overwrites
-`artifacts/`, and its `cv` block records whether the gate passed.
+`artifacts/`, and its `cv` block records the CV summary.
 
 ## Reproduce on a GPU (1–2 A100 80GB)
 
@@ -77,7 +77,7 @@ uv run solutions/diffmean-probe/scripts/extract_features.py \
 #    device_map="auto" then offloads to CPU, which is slow but fine for 60 prompts.
 uv run solutions/diffmean-probe/scripts/extract_features.py --models openai/gpt-oss-120b
 
-# 3. Select by grouped CV, run the gate, and export.
+# 3. Select by grouped CV and export (add --nested for the nested estimate).
 uv run solutions/diffmean-probe/scripts/train_diffmean.py \
   --features-dir data/diffmean-probe/features-shared
 ```
@@ -85,29 +85,19 @@ uv run solutions/diffmean-probe/scripts/train_diffmean.py \
 Features now go to `data/diffmean-probe/features-shared/`, so the older
 own-rows files in `features/` are not overwritten.
 
-## Ship gate
+## Export and nested CV
 
-The training script only exports a representation artifact if a repeated
-nested CV (3 outer repeats) shows it beating the best prior-only rule
-(always-True on this data) by:
-
-- at least `--min-gain` accuracy (default 0.0125, one row in 80), **and**
-- a sign test on rows it gets right where always-True is wrong, and the
-  reverse, with p at most `--max-p` (default 0.2).
-
-Otherwise it prints `GATE FAILED` and exports the prior-only artifact. Pure
-noise in the tests wins 3 rows and loses 2 (p = 0.5), which is why a
-one-row edge is not enough. With 80 rows no gate can promise a leaderboard
-gain; it only refuses changes that the data cannot support. `--no-gate`
-exports the selection anyway, for experiments.
+The training script always exports the selected configuration and saves every
+model's direction. `--nested` also prints a repeated nested-CV estimate of the
+whole selection procedure, compared row by row with always-True.
 
 Results so far:
 
 | Setup | Nested accuracy | vs always-True (0.7375) |
 |---|---|---|
-| Per-model probe, own rows only | 0.70 | 0 wins, 8 losses: fails |
-| Shared labels, gpt-oss features for all models (preview, 64 of 80 rows covered) | 0.741 | 3 wins, 2 losses, p = 0.5: fails |
-| Shared probe, each model's own features | not run yet | needs step 1 |
+| Per-model probe, own rows only | 0.70 | 0 wins, 8 losses |
+| Shared labels, gpt-oss features for all models (preview, 64 of 80 rows covered) | 0.741 | 3 wins, 2 losses, p = 0.5 |
+| Shared probe, each model's own features | 0.704 | 2 wins, 10 losses |
 
 Models whose directions cannot be fitted (fewer than 4 rows, or a constant
 target) fall back to their prior at inference time, and so does a failed

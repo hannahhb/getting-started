@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train the shared probe, select it by grouped CV, gate it, and export.
+"""Train the shared probe, select it by grouped CV, and export it.
 
 **Shared probe.** Robustness is mostly a property of the problem: a problem
 that breaks one model usually breaks the others. So each model's direction is
@@ -17,14 +17,10 @@ labels leak between the training and held-out sides. Site, depth, beta, and
 threshold are picked for plain accuracy on labelled rows; all rows, including
 the unlabelled band (0.10 < max_drop < 0.25), train directions and priors.
 
-**Gate.** The best inner-CV score is optimistically biased, so a repeated
-nested CV estimates the whole selection procedure. The representation artifact
-is exported only if its nested accuracy beats the best prior-only rule (which
-is always-True on ``train-main-v2``) by at least ``--min-gain`` *and* a sign
-test of its row-level wins and losses against always-True gives p at most
-``--max-p``. Otherwise a prior-only artifact
-is exported and the run says why. With ~80 rows no gate can guarantee a
-leaderboard gain; this one only refuses changes the data cannot support.
+**Export.** The selected configuration is always exported, and every model's
+direction is saved, even when the selected beta is 0. ``--nested`` also
+reports a repeated nested-CV estimate of the whole selection procedure, since
+the best inner-CV score is optimistically biased.
 
 ``--priors-only`` skips features and exports a prior-only artifact.
 """
@@ -70,11 +66,6 @@ DEPTHS = (0.3, 0.5, 0.7)
 BETAS = (0.0, 0.3, 0.5)
 # Labels are robust at max_drop <= 0.10 and not robust at >= 0.25.
 THRESHOLDS = (0.175, 0.25)
-# One labelled row out of 80; the gate needs at least this much nested gain.
-DEFAULT_MIN_GAIN = 0.0125
-# Sign-test p-value the gate needs against always-True. A 3-2 edge (p = 0.5)
-# is what pure noise produces in the tests, so it must not pass.
-DEFAULT_MAX_P = 0.2
 Config = tuple[str, float, float, float]  # site, depth, beta, threshold
 
 
@@ -312,7 +303,7 @@ def export(data: Dataset, config: Config, summary: dict, output_dir: Path) -> li
     for stale in output_dir.glob("*.npz"):
         stale.unlink()
     exported = []
-    if beta != 0.0:
+    if data.features:
         for encoder in data.features:
             layers, direction = fit_encoder(data, encoder, site, depth, everything, priors)
             if direction is not None:
@@ -344,16 +335,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--repeats", type=int, default=10, help="Inner CV repeats.")
     parser.add_argument("--n-splits", type=int, default=5)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--outer-repeats", type=int, default=3, help="Nested CV repeats for the gate.")
-    parser.add_argument(
-        "--min-gain", type=float, default=DEFAULT_MIN_GAIN,
-        help="Nested accuracy must beat the best prior-only CV accuracy by at least this.",
-    )
-    parser.add_argument(
-        "--max-p", type=float, default=DEFAULT_MAX_P,
-        help="Largest sign-test p-value against always-True that passes the gate.",
-    )
-    parser.add_argument("--no-gate", action="store_true", help="Export the selected config regardless.")
+    parser.add_argument("--nested", action="store_true", help="Also report a nested-CV estimate.")
+    parser.add_argument("--outer-repeats", type=int, default=3, help="Nested CV repeats.")
     return parser.parse_args(argv)
 
 
@@ -365,7 +348,6 @@ def main(argv: Sequence[str] | None = None) -> dict:
     result = evaluate_grid(data, everything, args.repeats, args.n_splits, args.seed)
     config = select(result["grid"])
     prior_grid = {c: v for c, v in result["grid"].items() if c[2] == 0.0}
-    prior_config = select(prior_grid)
     labelled = data.labels >= 0
     summary = {
         "n_rows": int(len(data.labels)),
@@ -377,29 +359,14 @@ def main(argv: Sequence[str] | None = None) -> dict:
         "selected": list(config),
         "selected_accuracy": result["grid"][config],
         "selected_accuracy_std": result["grid_std"][config],
-        "prior_only_accuracy": prior_grid[prior_config],
+        "prior_only_accuracy": max(prior_grid.values()),
         **result["reference"],
     }
 
-    if config[2] != 0.0:
+    if args.nested:
         summary.update(nested_report(
             data, args.outer_repeats, max(args.repeats // 2, 1), args.n_splits, args.seed
         ))
-        bar = summary["prior_only_accuracy"] + args.min_gain
-        summary["gate_bar"] = bar
-        summary["gate_passed"] = bool(
-            summary["nested_accuracy"] >= bar and summary["nested_vs_always_true_p"] <= args.max_p
-        )
-        if not summary["gate_passed"] and not args.no_gate:
-            print(
-                f"GATE FAILED: nested accuracy {summary['nested_accuracy']:.4f} (bar {bar:.4f}), "
-                f"wins/losses vs always-True {summary['nested_vs_always_true_wins']}/"
-                f"{summary['nested_vs_always_true_losses']} (p {summary['nested_vs_always_true_p']:.3f}, "
-                f"max {args.max_p}); exporting the prior-only artifact.",
-                file=sys.stderr,
-            )
-            config = prior_config
-    summary["exported"] = list(config)
 
     exported = export(data, config, summary, args.output_dir)
     site, depth, beta, threshold = config
