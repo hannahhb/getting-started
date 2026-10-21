@@ -98,11 +98,24 @@ def _last_boxed(text: str) -> str | None:
     return None
 
 
+def parse_boxed(content: str) -> int | None:
+    """Integer in a ``\\boxed{}``, allowing working such as ``18 \\times 41 = 738``.
+
+    Thin-space separators (``742\\,899``) are removed, and when the content is
+    not itself an integer the value after the last ``=`` is used.
+    """
+    content = re.sub(r"\\[,;: ]|~", "", content).strip()
+    value = parse_integer(content)
+    if value is None and "=" in content:
+        value = parse_integer(content.rsplit("=", 1)[1])
+    return value
+
+
 def extract_answer(completion: str) -> int | None:
     """Final integer answer: last ``\\boxed{}``, else ``ANSWER:``, else the last integer."""
     boxed = _last_boxed(completion)
     if boxed is not None:
-        return parse_integer(boxed)
+        return parse_boxed(boxed)
     match = re.findall(r"ANSWER:\s*([+-]?[\d,]+)", completion)
     if match:
         return parse_integer(match[-1])
