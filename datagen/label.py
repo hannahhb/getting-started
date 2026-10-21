@@ -45,6 +45,8 @@ def main() -> None:
     problems = {row["problem_id"]: row for row in read_jsonl(args.work_dir / "problems.jsonl")}
     groups: dict[tuple[str, str, str], dict[str, list[bool]]] = defaultdict(lambda: defaultdict(list))
     for path in sorted((args.work_dir / "samples").glob("*.jsonl")):
+        if path.name.endswith(".traces.jsonl"):  # full responses, written by sample.py
+            continue
         for row in read_jsonl(path):
             key = (row["model_id"], row["reasoning_effort"], row["problem_id"])
             groups[key][row["type"]].extend(row["correct"])

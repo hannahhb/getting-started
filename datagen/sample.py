@@ -5,6 +5,8 @@ Originals get ``--base-samples`` samples and each variant gets
 ``--variant-samples``, at temperature 1.0 with the model's own chat template.
 Truncated generations count as wrong. Results are appended per prompt to
 ``<work-dir>/samples/<model>__<effort>.jsonl``, so an interrupted run resumes.
+The full responses (and, for OpenRouter, the separate reasoning text) go to
+``<model>__<effort>.traces.jsonl`` next to it, one line per prompt.
 ``--limit-problems N`` keeps the first N problems of ``problems.jsonl``
 (AIME first, then AMC, then Omni-MATH-2).
 
@@ -46,6 +48,20 @@ def samples_path(work_dir: Path, model: str, effort: str) -> Path:
     return work_dir / "samples" / f"{re.sub(r'[^A-Za-z0-9._-]+', '_', model)}__{effort}.jsonl"
 
 
+def traces_path(out: Path) -> Path:
+    return out.with_suffix(".traces.jsonl")
+
+
+def trace_row(job, texts, reasonings=None, finish_reasons=None) -> dict:
+    pid, kind, variant, _, _ = job
+    row = {"problem_id": pid, "type": kind, "variant": variant, "texts": texts}
+    if reasonings is not None:
+        row["reasoning"] = reasonings
+    if finish_reasons is not None:
+        row["finish_reasons"] = finish_reasons
+    return row
+
+
 def result_row(args, problems, job, answers, n_tokens, providers=None) -> dict:
     pid, kind, variant, _, _ = job
     gold = problems[pid]["answer"]
@@ -81,18 +97,24 @@ def run_vllm(args, problems, jobs, out) -> None:
                            seed=args.seed)
             for *_, n in chunk
         ]
-        rows = []
+        rows, traces = [], []
         for job, output in zip(chunk, llm.generate(prompts, params)):
             answers = [
                 extract_answer(c.text) if c.finish_reason == "stop" else None for c in output.outputs
             ]
             rows.append(result_row(args, problems, job, answers, [len(c.token_ids) for c in output.outputs]))
+            traces.append(trace_row(job, [c.text for c in output.outputs],
+                                    finish_reasons=[c.finish_reason for c in output.outputs]))
+        append_jsonl(traces_path(out), traces)
         append_jsonl(out, rows)
         print(f"  {min(start + args.chunk_size, len(jobs))}/{len(jobs)} prompts", flush=True)
 
 
-def openrouter_sample(args, key: str, text: str) -> tuple[int | None, int, str]:
-    """One sample: (answer or None, completion tokens, provider). Retries transient errors."""
+def openrouter_sample(args, key: str, text: str) -> tuple[int | None, int, str, str, str, str]:
+    """One sample: (answer, completion tokens, provider, content, reasoning, finish reason).
+
+    Retries transient errors.
+    """
     body = {
         "model": args.openrouter_model or args.model,
         "messages": [{"role": "user", "content": text + SOLVE_SUFFIX}],
@@ -115,9 +137,11 @@ def openrouter_sample(args, key: str, text: str) -> tuple[int | None, int, str]:
                 raise RuntimeError(str(reply.get("error", reply))[:200])
             choice = reply["choices"][0]
             content = choice["message"].get("content") or ""
-            answer = extract_answer(content) if choice.get("finish_reason") == "stop" else None
+            reasoning = choice["message"].get("reasoning") or ""
+            finish = str(choice.get("finish_reason") or "")
+            answer = extract_answer(content) if finish == "stop" else None
             tokens = int((reply.get("usage") or {}).get("completion_tokens") or 0)
-            return answer, tokens, str(reply.get("provider", ""))
+            return answer, tokens, str(reply.get("provider", "")), content, reasoning, finish
         except (urllib.error.URLError, TimeoutError, RuntimeError, KeyError, json.JSONDecodeError) as exc:
             if attempt == 5:
                 raise
@@ -142,7 +166,9 @@ def run_openrouter(args, problems, jobs, out) -> None:
             return
         row = result_row(args, problems, job, [r[0] for r in results], [r[1] for r in results],
                          [r[2] for r in results])
+        trace = trace_row(job, [r[3] for r in results], [r[4] for r in results], [r[5] for r in results])
         with lock:
+            append_jsonl(traces_path(out), [trace])
             append_jsonl(out, [row])
             done[0] += 1
             if done[0] % 25 == 0 or done[0] == len(jobs):

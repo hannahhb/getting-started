@@ -21,7 +21,7 @@ PROBLEMS="${PROBLEMS:-100}"
 BASE="${BASE:-4}"              # samples per original problem
 VARIANT="${VARIANT:-2}"        # samples per variant
 MAX_TOKENS="${MAX_TOKENS:-8192}"
-VLLM_PYTHON="${VLLM_PYTHON:-/data/gpfs/projects/punim0478/bansaab/venvs/vllm/bin/python}"
+VLLM_PYTHON="${VLLM_PYTHON:-/usr/bin/python}"   # the Python that has vLLM on Spartan
 
 cd "$SLURM_SUBMIT_DIR"
 "$VLLM_PYTHON" datagen/sample.py --model "$MODEL" --limit-problems "$PROBLEMS" \
