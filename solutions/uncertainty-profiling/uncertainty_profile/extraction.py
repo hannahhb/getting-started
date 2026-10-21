@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+import sys
 from collections.abc import Iterator, Sequence
 
 import numpy as np
@@ -16,6 +17,7 @@ from transformers import (
     PreTrainedTokenizerFast,
 )
 from transformers.generation.logits_process import LogitsProcessor, LogitsProcessorList
+from tqdm.auto import tqdm
 
 from uncertainty_profile.config import GenerationConfidenceConfig
 from uncertainty_profile.metrics import (
@@ -443,6 +445,24 @@ def compute_batch_features_from_scores(
 
 
 @torch.inference_mode()
+class GenerationProgress(LogitsProcessor):
+    """Advance a progress bar once per generated token; scores pass through unchanged."""
+
+    def __init__(self, bar: tqdm, prompt_length: int, eos_token_ids: set[int]) -> None:
+        self.bar = bar
+        self.prompt_length = prompt_length
+        self.eos_token_ids = torch.tensor(sorted(eos_token_ids)) if eos_token_ids else None
+
+    def __call__(self, input_ids: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
+        # Each call selects one new token, including the first after the prompt.
+        self.bar.update(1)
+        if self.eos_token_ids is not None and self.bar.n % 64 == 0:
+            generated = input_ids[:, self.prompt_length :]
+            finished = torch.isin(generated, self.eos_token_ids.to(generated.device)).any(dim=1)
+            self.bar.set_postfix(finished=f"{int(finished.sum())}/{input_ids.shape[0]}")
+        return scores
+
+
 def iter_generation_feature_batches(
     *,
     model: PreTrainedModel,
@@ -475,8 +495,10 @@ def iter_generation_feature_batches(
         eos_value = tokenizer.eos_token_id
     eos_token_ids = _token_id_set(eos_value) | _token_id_set(tokenizer.eos_token_id)
 
+    n_batches = -(-len(problem_texts) // config.batch_size)
     for start in range(0, len(problem_texts), config.batch_size):
         batch_texts = list(problem_texts[start : start + config.batch_size])
+        batch_number = start // config.batch_size + 1
         formatted = [
             format_problem(tokenizer, text, role=config.chat_template_role)
             for text in batch_texts
@@ -491,18 +513,32 @@ def iter_generation_feature_batches(
         encoded = {name: tensor.to(device) for name, tensor in encoded.items()}
         prompt_length = int(encoded["input_ids"].shape[1])
         collector = GenerationConfidenceCollector()
-        outputs = model.generate(
-            **encoded,
-            max_new_tokens=config.max_new_tokens,
-            do_sample=config.do_sample,
-            return_dict_in_generate=True,
-            output_scores=False,
-            logits_processor=LogitsProcessorList([collector]),
-            pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=eos_value,
-            use_cache=True,
-            cache_implementation=config.cache_implementation,
+        bar = tqdm(
+            total=config.max_new_tokens,
+            desc=(
+                f"batch {batch_number}/{n_batches} "
+                f"(problems {start + 1}-{start + len(batch_texts)} of {len(problem_texts)})"
+            ),
+            unit="tok",
+            file=sys.stderr,
+            mininterval=1.0 if sys.stderr.isatty() else 15.0,
         )
+        progress = GenerationProgress(bar, prompt_length, eos_token_ids)
+        try:
+            outputs = model.generate(
+                **encoded,
+                max_new_tokens=config.max_new_tokens,
+                do_sample=config.do_sample,
+                return_dict_in_generate=True,
+                output_scores=False,
+                logits_processor=LogitsProcessorList([collector, progress]),
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=eos_value,
+                use_cache=True,
+                cache_implementation=config.cache_implementation,
+            )
+        finally:
+            bar.close()
         metric_rows, generated_token_ids = collector.compute_features(
             sequences=outputs.sequences,
             prompt_length=prompt_length,
