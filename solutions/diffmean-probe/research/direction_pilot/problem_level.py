@@ -20,9 +20,9 @@ gives the reference to read it against.
 
 Run on a GPU from the repo root::
 
-    python analysis/direction_pilot/problem_level.py --model deepseek-ai/DeepSeek-R1-0528-Qwen3-8B
+    python solutions/diffmean-probe/research/direction_pilot/problem_level.py --model deepseek-ai/DeepSeek-R1-0528-Qwen3-8B
 
-Writes ``activations.npz``, ``auc.csv``, ``directions.npz`` (every candidate,
+Writes to ``data/diffmean-probe/direction_pilot/results/``: ``activations.npz``, ``auc.csv``, ``directions.npz`` (every candidate,
 fitted on all problems) and ``auc.png`` if matplotlib is available. Re-running
 skips extraction when ``activations.npz`` exists.
 """
@@ -37,8 +37,9 @@ from pathlib import Path
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(ROOT / "solutions" / "diffmean-probe"))
+OUTPUTS = ROOT / "data" / "diffmean-probe" / "direction_pilot"
 
 from diffmean_probe.common import format_problem, normalize_effort, problem_token_mask, safe_model_id  # noqa: E402
 
@@ -119,7 +120,7 @@ def main() -> None:
     args = parse_args()
     rows = [json.loads(line) for line in args.problems.read_text().splitlines() if line.strip()]
     effort = normalize_effort(args.model, args.effort)
-    out_dir = args.out_dir or HERE / "results" / f"problem_level__{safe_model_id(args.model)}__{effort}"
+    out_dir = args.out_dir or OUTPUTS / "results" / f"problem_level__{safe_model_id(args.model)}__{effort}"
     out_dir.mkdir(parents=True, exist_ok=True)
     act_path = out_dir / "activations.npz"
     if not act_path.is_file():

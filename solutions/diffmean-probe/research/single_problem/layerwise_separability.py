@@ -26,11 +26,11 @@ moved the state the model answers from.
 
 Run on a GPU from the repo root::
 
-    python analysis/single_problem/layerwise_separability.py \\
+    python solutions/diffmean-probe/research/single_problem/layerwise_separability.py \\
         --model deepseek-ai/DeepSeek-R1-0528-Qwen3-8B \\
-        --variants analysis/single_problem/variants_17017.jsonl
+        --variants solutions/diffmean-probe/research/single_problem/variants_17017.jsonl
 
-Writes ``activations.npz`` and ``results.csv`` (plus ``results.png`` if
+Writes to ``data/diffmean-probe/single_problem/results/``: ``activations.npz`` and ``results.csv`` (plus ``results.png`` if
 matplotlib is available) to ``--out-dir``; re-running skips extraction when
 ``activations.npz`` exists.
 """
@@ -46,7 +46,7 @@ from pathlib import Path
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(ROOT / "solutions" / "diffmean-probe"))
 
 from diffmean_probe.common import format_problem, normalize_effort, problem_token_mask, safe_model_id  # noqa: E402
@@ -150,7 +150,7 @@ def main() -> None:
     if rows[0]["type"] != "original":
         raise SystemExit("the first line of --variants must be the original problem")
     effort = normalize_effort(args.model, args.effort)
-    out_dir = args.out_dir or args.variants.parent / "results" / f"{args.variants.stem}__{safe_model_id(args.model)}__{effort}"
+    out_dir = args.out_dir or ROOT / "data" / "diffmean-probe" / "single_problem" / "results" / f"{args.variants.stem}__{safe_model_id(args.model)}__{effort}"
     out_dir.mkdir(parents=True, exist_ok=True)
     act_path = out_dir / "activations.npz"
     if not act_path.is_file():

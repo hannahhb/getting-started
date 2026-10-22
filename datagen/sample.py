@@ -44,8 +44,8 @@ from common import DEFAULT_WORK_DIR, SOLVE_SUFFIX, append_jsonl, extract_answer,
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
-def samples_path(work_dir: Path, model: str, effort: str) -> Path:
-    return work_dir / "samples" / f"{re.sub(r'[^A-Za-z0-9._-]+', '_', model)}__{effort}.jsonl"
+def samples_path(samples_dir: Path, model: str, effort: str) -> Path:
+    return samples_dir / f"{re.sub(r'[^A-Za-z0-9._-]+', '_', model)}__{effort}.jsonl"
 
 
 def traces_path(out: Path) -> Path:
@@ -187,6 +187,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--backend", default="vllm", choices=["vllm", "openrouter"])
     parser.add_argument("--openrouter-model", help="OpenRouter model id if it differs from --model.")
     parser.add_argument("--work-dir", type=Path, default=DEFAULT_WORK_DIR)
+    parser.add_argument("--samples-dir", type=Path, help="Where samples are written (default: <work-dir>/samples).")
     parser.add_argument("--limit-problems", type=int, help="Only the first N problems.")
     parser.add_argument("--base-samples", type=int, default=8)
     parser.add_argument("--variant-samples", type=int, default=4)
@@ -210,7 +211,7 @@ def main() -> None:
         for row in read_jsonl(args.work_dir / "variants.jsonl")
         if row["problem_id"] in problems
     ]
-    out = samples_path(args.work_dir, args.model, args.effort)
+    out = samples_path(args.samples_dir or args.work_dir / "samples", args.model, args.effort)
     done = {(row["problem_id"], row["type"], row["variant"]) for row in read_jsonl(out)}
     jobs = [job for job in jobs if job[:3] not in done]
     print(f"{args.model} ({args.effort}, {args.backend}): {len(problems)} problems, "

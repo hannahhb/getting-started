@@ -35,6 +35,7 @@ def directory_entries(directory: Path) -> dict[str, bytes]:
         if (
             path.is_file()
             and "__pycache__" not in relative.parts
+            and "research" not in relative.parts  # method development, not shipped
             and not path.name.endswith((".pyc", ".pyo"))
             and not path.name.startswith(".")
         ):

@@ -27,8 +27,11 @@ the interventions are what test whether it matters for solving.
 
 Run on a GPU from the repo root, after sampling the prompts::
 
-    python analysis/direction_pilot/prompt_level.py --model deepseek-ai/DeepSeek-R1-0528-Qwen3-8B
-    python analysis/direction_pilot/prompt_level.py --model deepseek-ai/DeepSeek-R1-0528-Qwen3-8B --causal
+    python datagen/sample.py --model deepseek-ai/DeepSeek-R1-0528-Qwen3-8B \\
+        --work-dir solutions/diffmean-probe/research/direction_pilot/work \\
+        --samples-dir data/diffmean-probe/direction_pilot/samples --base-samples 4 --variant-samples 4
+    python solutions/diffmean-probe/research/direction_pilot/prompt_level.py --model deepseek-ai/DeepSeek-R1-0528-Qwen3-8B
+    python solutions/diffmean-probe/research/direction_pilot/prompt_level.py --model deepseek-ai/DeepSeek-R1-0528-Qwen3-8B --causal
 """
 
 from __future__ import annotations
@@ -44,7 +47,8 @@ from pathlib import Path
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parents[1]
+ROOT = HERE.parents[3]
+OUTPUTS = ROOT / "data" / "diffmean-probe" / "direction_pilot"
 sys.path[:0] = [str(HERE), str(ROOT / "datagen"), str(ROOT / "solutions" / "diffmean-probe")]
 
 from common import SOLVE_SUFFIX, extract_answer, read_jsonl  # noqa: E402
@@ -52,15 +56,15 @@ from diffmean_probe.common import normalize_effort, safe_model_id  # noqa: E402
 from problem_level import auc, extract  # noqa: E402
 
 
-def load_prompts(work: Path, model: str, effort: str) -> list[dict]:
+def load_prompts(work: Path, samples_dir: Path, model: str, effort: str) -> list[dict]:
     """Original and variant prompts with the model's sampled accuracy."""
     problems = {p["problem_id"]: p for p in read_jsonl(work / "problems.jsonl")}
     prompts = [{"problem_id": pid, "type": "original", "variant": 0, "text": p["problem"]} for pid, p in problems.items()]
     prompts += [{k: v[k] for k in ("problem_id", "type", "variant", "text")} for v in read_jsonl(work / "variants.jsonl")]
-    samples_file = work / "samples" / f"{re.sub(r'[^A-Za-z0-9._-]+', '_', model)}__{effort}.jsonl"
+    samples_file = samples_dir / f"{re.sub(r'[^A-Za-z0-9._-]+', '_', model)}__{effort}.jsonl"
     samples = {(s["problem_id"], s["type"], s["variant"]): s for s in read_jsonl(samples_file)}
     if not samples:
-        raise SystemExit(f"no samples in {samples_file}; run datagen/sample.py --work-dir {work} first")
+        raise SystemExit(f"no samples in {samples_file}; run datagen/sample.py --work-dir {work} --samples-dir {samples_dir} first")
     for prompt in prompts:
         s = samples.get((prompt["problem_id"], prompt["type"], prompt["variant"]))
         prompt["accuracy"] = float(np.mean(s["correct"])) if s else None
@@ -157,6 +161,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model", required=True)
     parser.add_argument("--work-dir", type=Path, default=HERE / "work")
+    parser.add_argument("--samples-dir", type=Path, default=OUTPUTS / "samples")
     parser.add_argument("--effort", default="default")
     parser.add_argument("--failed-max", type=float, default=0.25)
     parser.add_argument("--solved-min", type=float, default=0.75)
@@ -175,14 +180,14 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     effort = normalize_effort(args.model, args.effort)
-    prompts = load_prompts(args.work_dir, args.model, effort)
+    prompts = load_prompts(args.work_dir, args.samples_dir, args.model, effort)
     keep = [p for p in prompts if p["accuracy"] <= args.failed_max or p["accuracy"] >= args.solved_min]
     counts = defaultdict(lambda: [0, 0])
     for p in keep:
         counts[p["problem_id"]][p["accuracy"] <= args.failed_max] += 1
     print(f"{len(prompts)} sampled prompts, {len(keep)} kept | per problem [solved, failed]: {dict(counts)}")
 
-    out_dir = args.out_dir or HERE / "results" / f"prompt_level__{safe_model_id(args.model)}__{effort}"
+    out_dir = args.out_dir or OUTPUTS / "results" / f"prompt_level__{safe_model_id(args.model)}__{effort}"
     out_dir.mkdir(parents=True, exist_ok=True)
     act_path = out_dir / "activations.npz"
     texts = [p["text"] for p in keep]
