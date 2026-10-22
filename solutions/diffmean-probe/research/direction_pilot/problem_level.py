@@ -79,7 +79,8 @@ def extract(model_id: str, effort: str, problems: list[str], path: Path) -> None
             states.append(np.stack(columns, axis=1).astype(np.float32))  # (L+1, P, d)
             print(f"  problem {i}: {int(mask.sum())} problem tokens, {len(post)} template tokens after", flush=True)
     finally:
-        release(model)
+        del model
+        release()
     np.savez(path, states=np.stack(states), names=np.asarray(names))
 
 

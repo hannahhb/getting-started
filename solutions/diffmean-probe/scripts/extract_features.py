@@ -155,7 +155,8 @@ def main() -> None:
                 for problem, effort in keys
             }
         finally:
-            release(model)
+            del model
+            release()
         encoded = [cache[(row["problem"], effort)] for row, effort in zip(rows, efforts)]
         extra = {}
         if behaviour:

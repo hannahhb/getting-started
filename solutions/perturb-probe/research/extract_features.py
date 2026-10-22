@@ -57,7 +57,7 @@ def main() -> None:
     parser.add_argument("--problems", type=Path, default=HERE / "train_set" / "problems.jsonl")
     parser.add_argument("--out-dir", type=Path, default=OUT)
     parser.add_argument("--n", type=int, default=4, help="Traces per prompt.")
-    parser.add_argument("--budget", type=int, default=1024, help="Thinking tokens before the answer is forced.")
+    parser.add_argument("--budget", type=int, default=4096, help="Thinking tokens before the answer is forced.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--with-uncertainty", action="store_true")
     args = parser.parse_args()
@@ -96,7 +96,8 @@ def main() -> None:
                     print(f"  {k}/{len(todo)} {pid}: reference {features['reference']}, agree {features.get('agree_mean')}, "
                           f"dlogp {features.get('dlogp')}, {row['seconds']}s", flush=True)
         finally:
-            release(model)
+            del model
+            release()
 
 
 if __name__ == "__main__":

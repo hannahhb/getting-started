@@ -38,7 +38,8 @@ def _scores(
             )
             behaviour_scores = entry.behaviour.score(values)
     finally:
-        release(model)
+        del model
+        release()
     return hidden_scores, behaviour_scores
 
 

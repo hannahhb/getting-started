@@ -77,7 +77,8 @@ def extract(model_id: str, effort: str, rows: list[dict], path: Path) -> None:
             arrays[f"ids{i}"] = encoded["input_ids"][0].numpy()[mask]
             print(f"  prompt {i} ({row['type']} {row['variant']}): {int(mask.sum())} problem tokens", flush=True)
     finally:
-        release(model)
+        del model
+        release()
     np.savez(path, n=len(rows), **arrays)
 
 

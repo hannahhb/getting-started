@@ -69,9 +69,12 @@ def load_model(model_id: str) -> tuple[Any, Any]:
     return tokenizer, model
 
 
-def release(model: Any) -> None:
-    """Drop a model and return its memory to the allocator."""
-    del model
+def release(*_unused: Any) -> None:
+    """Return freed GPU memory to the device.
+
+    Call after the caller has dropped its own references (``del model``):
+    deleting a parameter here cannot free a model the caller still holds.
+    """
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()

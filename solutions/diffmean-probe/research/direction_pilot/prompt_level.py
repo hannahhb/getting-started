@@ -145,7 +145,8 @@ def causal(args, prompts, failed, directions, layer, position, names, out_dir) -
             print(f"  {mode:6s} {prompt['problem_id']} {prompt['type']}#{prompt['variant']}: accuracy "
                   f"{prompt['accuracy']:.2f} -> {np.mean(correct):.2f}, tokens {prompt['mean_tokens']:.0f} -> {np.mean(lengths):.0f}", flush=True)
     finally:
-        release(model)
+        del model
+        release()
     with (out_dir / f"causal_layer{layer}_{names[position].split(':')[0]}.csv").open("w", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
         writer.writeheader()

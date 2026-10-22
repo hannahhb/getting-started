@@ -70,8 +70,12 @@ def load_model(model_id: str) -> tuple[Any, Any]:
     return tokenizer, model
 
 
-def release(model: Any) -> None:
-    del model
+def release(*_unused: Any) -> None:
+    """Return freed GPU memory to the device.
+
+    Call after the caller has dropped its own references (``del model``):
+    deleting a parameter here cannot free a model the caller still holds.
+    """
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -186,7 +190,7 @@ def answer_logprobs(model, tokenizer, contexts: list[str], answer: int, batch: i
     return scores
 
 
-def probe_problem(model, tokenizer, model_id: str, effort: str, text: str, *, n: int = 4, budget: int = 1024,
+def probe_problem(model, tokenizer, model_id: str, effort: str, text: str, *, n: int = 4, budget: int = 4096,
                   seed: int = 0, x_processor=None) -> dict:
     """Features for one problem (see FEATURES); x_raw holds X's raw generation for extra collectors."""
     style = style_of(tokenizer)
